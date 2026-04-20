@@ -114,6 +114,22 @@ def _import_engine():
 def _import_spec():
     importlib.import_module("autochecker.spec")
 
+@check("structured feedback contract validates")
+def _feedback_contract():
+    from autochecker.spec import StructuredFeedback
+    feedback = StructuredFeedback(
+        status="FAIL",
+        short_reason="Service unreachable",
+        detailed_reason="GET /health timed out during the check.",
+        likely_cause="The backend is not running or is bound to the wrong port.",
+        next_steps=["Check process status", "Verify the configured port"],
+        hint="Make sure the service is running.",
+        escalation_state="eligible",
+    )
+    assert feedback.status == "FAIL"
+    assert feedback.escalation_state == "eligible"
+    assert len(feedback.next_steps) == 2
+
 @check("import autochecker.reporter")
 def _import_reporter():
     importlib.import_module("autochecker.reporter")
@@ -229,6 +245,54 @@ def _spec_load_02():
     spec = load_spec(str(ROOT / "specs" / "lab-02.yaml"))
     assert spec.id == "lab-02"
     assert len(spec.checks) > 0
+
+@check("extended spec fields validate")
+def _extended_spec_fields():
+    from autochecker.spec import LabSpec
+
+    data = {
+        "id": "lab-test",
+        "title": "Test Lab",
+        "learning_objectives": ["Understand health checks"],
+        "teacher_summary": {
+            "category": "deployment",
+            "tags": ["backend", "runtime"],
+            "summary_template": "Deployment-focused checks",
+            "intervention_hints": ["Review service startup logs"],
+        },
+        "checks": [
+            {
+                "id": "health_check",
+                "type": "http_check",
+                "description": "Health endpoint responds",
+                "tutoring": {
+                    "short_reason_template": "The API is not reachable.",
+                    "detailed_reason_template": "The health endpoint did not respond.",
+                    "likely_cause_template": "The service may not be running.",
+                    "next_steps": ["Run the service", "Check logs"],
+                },
+                "escalation": {
+                    "enabled": True,
+                    "after_failed_attempts": 3,
+                    "strategy": "vm_runtime_diagnosis",
+                    "params": {"log_path": "/var/log/app.log"},
+                },
+            }
+        ],
+    }
+
+    try:
+        spec = LabSpec.model_validate(data)
+    except AttributeError:
+        spec = LabSpec.parse_obj(data)
+
+    assert spec.learning_objectives == ["Understand health checks"]
+    assert spec.teacher_summary is not None
+    assert spec.teacher_summary.category == "deployment"
+    assert spec.checks[0].tutoring is not None
+    assert spec.checks[0].tutoring.next_steps == ["Run the service", "Check logs"]
+    assert spec.checks[0].escalation is not None
+    assert spec.checks[0].escalation.after_failed_attempts == 3
 
 
 # ---------------------------------------------------------------------------
