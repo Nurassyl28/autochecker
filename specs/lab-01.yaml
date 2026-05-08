@@ -329,33 +329,56 @@ checks:
       min_items: 2
       item_kinds: ["bullet", "numbered", "nonempty_line"]
 
-  - id: t1_llm_arch_quality
+  - id: t1_arch_components_min5
     task: task-1
-    title: "LLM: architecture.md content quality"
-    class: content
-    runner: llm
-    type: llm_judge
+    title: "Main components section lists at least 5 components"
+    class: structural
+    runner: code
+    type: markdown_section_item_count
     is_required: true
-    weight: 4
-    depends_on: [t1_arch_sections_nonempty, t1_arch_embeds_svgs, t1_arch_linked_files_exist]
+    weight: 2
+    depends_on: [t1_arch_sections_nonempty]
     hint: >
-      The content of your architecture.md needs improvement.
-      See the LLM feedback below for specific suggestions.
+      The "## Main components" section must list at least 5 components as bullet
+      or numbered items, each with a short explanation.
     params:
-      inputs:
-        - { kind: "file", path: "docs/architecture.md" }
-      rubric: |
-        Grade 0..5. Pass requires >=3.
-        Check:
-        - Product Choice includes name + website + short description.
-        - At least 5 components are selected and each has a 1-2 sentence explanation.
-        - Data flow is coherent: describes a user action and which components exchange what data.
-        - Deployment is coherent: explains where main components run.
-        - Assumptions are realistic and at least 2.
-        - Open questions are thoughtful and at least 2.
-        Return JSON only:
-        {"score":0-5,"reasons":[...],"quotes":[{"text":"...","why":"..."}]}
-      min_score: 3
+      path: "docs/architecture.md"
+      heading: "Main components"
+      min_items: 5
+      item_kinds: ["bullet", "numbered"]
+
+  - id: t1_arch_product_url
+    task: task-1
+    title: "Product Choice section contains a website link"
+    class: structural
+    runner: code
+    type: urls_in_markdown_section_min
+    is_required: true
+    weight: 1
+    depends_on: [t1_arch_sections_nonempty]
+    hint: >
+      The "## Product Choice" section must include the product's website URL
+      (https://...) alongside the name and short description.
+    params:
+      path: "docs/architecture.md"
+      heading: "Product Choice"
+      min: 1
+
+  - id: t1_arch_min_words
+    task: task-1
+    title: "architecture.md has substantive content (>=400 words)"
+    class: structural
+    runner: code
+    type: file_word_count
+    is_required: true
+    weight: 1
+    depends_on: [t1_arch_sections_nonempty]
+    hint: >
+      Your docs/architecture.md is too short. Expand the explanations
+      under each section — aim for at least 400 words across the whole file.
+    params:
+      path: "docs/architecture.md"
+      min_words: 400
 
   - id: t1_issue_closed
     task: task-1
@@ -469,31 +492,58 @@ checks:
         - "Roles and responsibilities"
         - "Common skills across roles"
 
-  - id: t2_llm_roles_quality
+  - id: t2_components_roles_min5
     task: task-2
-    title: "LLM: roles and skills content quality"
-    class: content
-    runner: llm
-    type: llm_judge
+    title: "Components and roles section has at least 5 entries"
+    class: structural
+    runner: code
+    type: markdown_section_item_count
     is_required: true
-    weight: 4
+    weight: 2
     depends_on: [t2_roles_sections_nonempty]
     hint: >
-      The content of your roles and skills sections needs improvement.
-      See the LLM feedback below for specific suggestions.
+      The "## Components and roles" section must list at least 5 components,
+      with the roles for each component as nested bullets.
     params:
-      inputs:
-        - { kind: "file", path: "docs/roles-and-skills.md" }
-      rubric: |
-        Grade 0..5. Pass requires >=3.
-        Focus ONLY on these sections: Components and roles, Roles and responsibilities, Common skills across roles.
-        Check:
-        - Components and roles: roles listed for components (nested list, not just one-liners). At least 5 components.
-        - Roles and responsibilities: at least 5 roles with concrete responsibilities.
-        - Common skills across roles: skills are tied to responsibilities (not random buzzwords).
-        Return JSON only:
-        {"score":0-5,"reasons":[...],"quotes":[{"text":"...","why":"..."}]}
-      min_score: 3
+      path: "docs/roles-and-skills.md"
+      heading: "Components and roles"
+      min_items: 5
+      item_kinds: ["bullet", "numbered"]
+
+  - id: t2_roles_responsibilities_min5
+    task: task-2
+    title: "Roles and responsibilities section has at least 5 entries"
+    class: structural
+    runner: code
+    type: markdown_section_item_count
+    is_required: true
+    weight: 1
+    depends_on: [t2_roles_sections_nonempty]
+    hint: >
+      The "## Roles and responsibilities" section must list at least 5 roles,
+      each with concrete responsibilities.
+    params:
+      path: "docs/roles-and-skills.md"
+      heading: "Roles and responsibilities"
+      min_items: 5
+      item_kinds: ["bullet", "numbered"]
+
+  - id: t2_common_skills_min5
+    task: task-2
+    title: "Common skills across roles section has at least 5 entries"
+    class: structural
+    runner: code
+    type: markdown_section_item_count
+    is_required: true
+    weight: 1
+    depends_on: [t2_roles_sections_nonempty]
+    hint: >
+      The "## Common skills across roles" section must list at least 5 skills.
+    params:
+      path: "docs/roles-and-skills.md"
+      heading: "Common skills across roles"
+      min_items: 5
+      item_kinds: ["bullet", "numbered"]
 
   - id: t2_issue_closed
     task: task-2
@@ -612,31 +662,40 @@ checks:
       heading: "Job market snapshot"
       min: 5
 
-  - id: t3_llm_skills_quality
+  - id: t3_chosen_role_items_min5
     task: task-3
-    title: "LLM: tech skills and market content quality"
-    class: content
-    runner: llm
-    type: llm_judge
+    title: "My chosen role section has at least 5 entries"
+    class: structural
+    runner: code
+    type: markdown_section_item_count
     is_required: true
-    weight: 4
+    weight: 2
     depends_on: [t3_roles_sections_nonempty]
     hint: >
-      The content of your skills/market sections needs improvement.
-      See the LLM feedback below for specific suggestions.
+      The "## My chosen role" section must contain at least 5 bullets covering
+      the role name, skills you already have, and skills you clearly lack.
     params:
-      inputs:
-        - { kind: "file", path: "docs/roles-and-skills.md" }
-      rubric: |
-        Grade 0..5. Pass requires >=3.
-        Focus ONLY on these sections: My chosen role, Job market snapshot, Personal reflection.
-        Check:
-        - My chosen role: contains role name + skills I already have + skills I clearly lack.
-        - Job market snapshot: skills extracted from postings (not just links). Common and unique skills identified.
-        - Personal reflection: 5-10 sentences, personal and specific. Not written by AI.
-        Return JSON only:
-        {"score":0-5,"reasons":[...],"quotes":[{"text":"...","why":"..."}]}
-      min_score: 3
+      path: "docs/roles-and-skills.md"
+      heading: "My chosen role"
+      min_items: 5
+      item_kinds: ["bullet", "numbered"]
+
+  - id: t3_roles_md_min_words
+    task: task-3
+    title: "roles-and-skills.md has substantive content (>=800 words)"
+    class: structural
+    runner: code
+    type: file_word_count
+    is_required: true
+    weight: 2
+    depends_on: [t3_roles_sections_nonempty]
+    hint: >
+      Your docs/roles-and-skills.md is too short. Expand the explanations
+      across all sections — aim for at least 800 words across the whole file,
+      including a personal reflection of roughly 5-10 sentences.
+    params:
+      path: "docs/roles-and-skills.md"
+      min_words: 800
 
   - id: t3_issue_closed
     task: task-3
