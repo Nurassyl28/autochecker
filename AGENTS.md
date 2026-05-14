@@ -76,6 +76,7 @@ Primary ownership for the current user:
 
 ## Stack
 - Python
+- uv
 - Typer CLI
 - FastAPI
 - aiogram
@@ -92,10 +93,12 @@ Primary ownership for the current user:
 - Do not rename files unless necessary.
 - Do not rewrite working subsystems just to make them cleaner.
 - Preserve spec-driven behavior and existing entry points.
+- Use `uv` as the default local developer workflow for environment management and command execution.
+- Prefer `uv run ...` for repo commands and `uv pip install -r requirements.txt` for local dependency installation.
 - Keep student-facing feedback concrete and action-oriented.
 - Keep instructor-facing output summarized and operationally useful.
 - Ask before making broad schema changes or changing core data contracts.
-- Run relevant verification after changes. Prefer `python verify.py` and targeted tests such as `pytest tests/test_agent_eval.py -v` when applicable.
+- Run relevant verification after changes. Prefer `uv run python verify.py` and targeted tests such as `uv run pytest tests/test_agent_eval.py -v` when applicable.
 - Keep infrastructure constraints in mind, especially relay-based access to student VMs and restricted university-network execution paths.
 
 ## Important Files

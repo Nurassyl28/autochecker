@@ -106,7 +106,7 @@ When asked to update a spec:
 5. Update the YAML spec accordingly
 6. Verify by running:
    ```bash
-   python main.py check -s <student> -l <lab> -t <task> -p github
+   uv run python main.py check -s <student> -l <lab> -t <task> -p github
    ```
 
 ### Common pitfalls
@@ -121,11 +121,11 @@ When asked to update a spec:
 
 ```bash
 # Test a specific task
-python main.py check -s <student> -l lab-01 -t task-0 -p github
+uv run python main.py check -s <student> -l lab-01 -t task-0 -p github
 
 # Test all checks
-python main.py check -s <student> -l lab-01 -p github
+uv run python main.py check -s <student> -l lab-01 -p github
 
 # Batch check all students
-python main.py batch -l lab-01 -p github
+uv run python main.py batch -l lab-01 -p github
 ```

@@ -10,9 +10,10 @@ import json
 import logging
 import os
 import uuid
+from collections import Counter, defaultdict
 from datetime import date
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urlencode
 
 import aiosqlite
@@ -852,6 +853,67 @@ async def _log_api_access(email: str, endpoint: str) -> None:
         logger.warning("Failed to log API access for %s", email, exc_info=True)
 
 
+def _safe_json_loads(text: Any) -> list[dict]:
+    """Parse JSON list payload safely."""
+    if not text or not isinstance(text, str):
+        return []
+    try:
+        data = json.loads(text)
+        return data if isinstance(data, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def _is_pass_status(check: dict) -> bool:
+    """Return True when a check is in PASS status."""
+    return str(check.get("status", "")).upper() == "PASS"
+
+
+def _extract_common_failure_keys(check: dict) -> list[str]:
+    """Build compact keys for failure clustering."""
+    if _is_pass_status(check):
+        return []
+    check_id = str(check.get("id", "")).strip() or "unknown_check"
+    short_reason = str(check.get("short_reason", "")).strip()
+    likely_cause = str(check.get("likely_cause", "")).strip()
+    base = likely_cause or short_reason or str(check.get("details", "")).strip()[:140] or "unspecified failure"
+    return [f"{check_id} :: {base}"]
+
+
+async def _load_latest_results_rows(
+    db: aiosqlite.Connection,
+    lab_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+) -> list[dict]:
+    """Load latest result per (student, lab, task), optionally filtered."""
+    query = """
+        SELECT r.tg_id, u.github_alias, u.student_group, r.lab_id, r.task_id,
+               r.score, r.passed, r.failed, r.total, r.details, r.timestamp
+        FROM results r
+        JOIN users u ON u.tg_id = r.tg_id
+    """
+    clauses = []
+    params: list[Any] = []
+    if lab_id:
+        clauses.append("r.lab_id = ?")
+        params.append(lab_id)
+    if task_id:
+        clauses.append("r.task_id = ?")
+        params.append(task_id)
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY r.timestamp DESC"
+
+    latest: dict[tuple[int, str, str], dict] = {}
+    async with db.execute(query, tuple(params)) as cur:
+        async for row in cur:
+            row_d = dict(row)
+            key = (row_d["tg_id"], row_d["lab_id"], row_d["task_id"])
+            if key not in latest:
+                latest[key] = row_d
+    return list(latest.values())
+
+
 @app.get("/api/items")
 async def api_items(request: Request):
     """Return the lab/task catalog derived from autochecker specs."""
@@ -1032,6 +1094,130 @@ async def api_access_log(request: Request, github_alias: str):
     return JSONResponse({
         "github_alias": github_alias,
         "endpoints": entries,
+    })
+
+
+@app.get("/api/teacher/summary/student/{github_alias}")
+async def api_teacher_summary_student(github_alias: str):
+    """Teacher-assistant summary for one student."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await _load_latest_results_rows(db)
+        student_rows = [r for r in rows if r["github_alias"] == github_alias]
+        if not student_rows:
+            return JSONResponse({"error": "student not found"}, status_code=404)
+
+    tasks: list[dict] = []
+    fail_counter: Counter[str] = Counter()
+    pass_count = 0
+    for row in student_rows:
+        checks = _safe_json_loads(row.get("details"))
+        for c in checks:
+            for key in _extract_common_failure_keys(c):
+                fail_counter[key] += 1
+        task_pass = _cell_status(row.get("passed"), row.get("failed"), row.get("total")) in ("pass", "partial")
+        if task_pass:
+            pass_count += 1
+        tasks.append({
+            "lab_id": row["lab_id"],
+            "task_id": row["task_id"],
+            "score": row.get("score"),
+            "status": "pass" if task_pass else "needs_attention",
+            "timestamp": row.get("timestamp"),
+        })
+
+    completion_rate = round((pass_count / len(student_rows) * 100), 1) if student_rows else 0.0
+    top_failures = [{"pattern": k, "count": v} for k, v in fail_counter.most_common(5)]
+
+    return JSONResponse({
+        "student": github_alias,
+        "completion_rate": completion_rate,
+        "tasks": tasks,
+        "common_failures": top_failures,
+        "intervention_suggestions": [
+            "Focus on the most frequent failure pattern first.",
+            "Ask the student to submit logs/evidence for the failed step.",
+            "Re-run one task after a targeted fix to validate progress.",
+        ],
+    })
+
+
+@app.get("/api/teacher/summary/task")
+async def api_teacher_summary_task(
+    lab_id: str = Query(...),
+    task_id: str = Query(...),
+):
+    """Teacher-assistant summary for a specific task."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await _load_latest_results_rows(db, lab_id=lab_id, task_id=task_id)
+
+    total_students = len(rows)
+    pass_students = 0
+    fail_counter: Counter[str] = Counter()
+    escalation_counter: Counter[str] = Counter()
+    for row in rows:
+        if _cell_status(row.get("passed"), row.get("failed"), row.get("total")) in ("pass", "partial"):
+            pass_students += 1
+        for c in _safe_json_loads(row.get("details")):
+            esc_state = str(c.get("escalation_state", "none"))
+            escalation_counter[esc_state] += 1
+            for key in _extract_common_failure_keys(c):
+                fail_counter[key] += 1
+
+    pass_rate = round((pass_students / total_students * 100), 1) if total_students else 0.0
+    return JSONResponse({
+        "lab_id": lab_id,
+        "task_id": task_id,
+        "students_total": total_students,
+        "students_passed": pass_students,
+        "pass_rate": pass_rate,
+        "common_failures": [{"pattern": k, "count": v} for k, v in fail_counter.most_common(10)],
+        "escalation_states": dict(escalation_counter),
+    })
+
+
+@app.get("/api/teacher/summary/cohort")
+async def api_teacher_summary_cohort(lab_id: Optional[str] = Query(default=None)):
+    """Teacher-assistant cohort summary with clustering by failure pattern."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await _load_latest_results_rows(db, lab_id=lab_id)
+
+    by_group: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        by_group[(row.get("student_group") or "unknown").strip() or "unknown"].append(row)
+
+    group_summaries: list[dict] = []
+    cohort_failures: Counter[str] = Counter()
+    for group, group_rows in sorted(by_group.items()):
+        passed = 0
+        for row in group_rows:
+            if _cell_status(row.get("passed"), row.get("failed"), row.get("total")) in ("pass", "partial"):
+                passed += 1
+            for c in _safe_json_loads(row.get("details")):
+                for key in _extract_common_failure_keys(c):
+                    cohort_failures[key] += 1
+        pass_rate = round((passed / len(group_rows) * 100), 1) if group_rows else 0.0
+        group_summaries.append({
+            "group": group,
+            "results_count": len(group_rows),
+            "pass_rate": pass_rate,
+        })
+
+    interventions = []
+    for pattern, count in cohort_failures.most_common(5):
+        interventions.append({
+            "pattern": pattern,
+            "count": count,
+            "suggestion": "Prepare a short targeted clarification and one reproducible fix example.",
+        })
+
+    return JSONResponse({
+        "lab_id": lab_id or "all",
+        "groups": group_summaries,
+        "common_failures": [{"pattern": k, "count": v} for k, v in cohort_failures.most_common(15)],
+        "interventions": interventions,
     })
 
 

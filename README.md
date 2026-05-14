@@ -12,34 +12,35 @@ Automated student lab checker with Telegram bot and web dashboard.
 ## Quick Start
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+uv venv
+uv pip install -r requirements.txt
 cp .env.example .env   # fill in tokens
 ```
+
+The default local development workflow for this repo uses `uv`.
 
 ### CLI — check a single student
 
 ```bash
-python main.py check -s Nurassyl28 -l lab-01 -p github
+uv run python main.py check -s Nurassyl28 -l lab-01 -p github
 ```
 
 ### CLI — batch check
 
 ```bash
-python main.py batch -s students.csv -l lab-01 -p github --workers 2
+uv run python main.py batch -s students.csv -l lab-01 -p github --workers 2
 ```
 
 ### Telegram bot
 
 ```bash
-python main_bot.py
+uv run python main_bot.py
 ```
 
 ### Dashboard
 
 ```bash
-uvicorn dashboard.app:app --host 0.0.0.0 --port 8000
+uv run uvicorn dashboard.app:app --host 0.0.0.0 --port 8000
 ```
 
 ## Project Structure
@@ -155,7 +156,7 @@ The checker automatically filters out false positives:
 cat students.txt  # one GitHub username per line
 
 # 2. Run batch check with plagiarism analysis
-python main.py batch \
+uv run python main.py batch \
   -s students.txt \
   -l lab-03 \
   --template-repo your-org/your-template-repo \
@@ -212,7 +213,7 @@ plagiarism:
 After the automated screening, investigate critical/high pairs with:
 
 ```bash
-python scripts/investigate_pair.py \
+uv run python scripts/investigate_pair.py \
   --student-a AleksKornilov07 --student-b venimu \
   --repo se-toolkit-lab-4 \
   --template inno-se-toolkit/se-toolkit-lab-4
@@ -417,7 +418,7 @@ docker compose up -d
 ### Pre-deploy verification
 
 ```bash
-python verify.py
+uv run python verify.py
 ```
 
 Checks file structure, imports, path resolution, CLI commands, spec loading, no stale references, and deploy file correctness.
@@ -485,10 +486,10 @@ ACTIVE_LABS=lab-01,lab-02,lab-03,lab-04
 
 ```bash
 # Check that the spec parses correctly
-python -c "from autochecker.spec import load_spec; s = load_spec('specs/lab-XX.yaml'); print(f'{len(s[\"checks\"])} checks loaded')"
+uv run python -c "from autochecker.spec import load_spec; s = load_spec('specs/lab-XX.yaml'); print(f'{len(s[\"checks\"])} checks loaded')"
 
 # Test against a known student repo
-python main.py check -s <student-username> -l lab-XX -p github
+uv run python main.py check -s <student-username> -l lab-XX -p github
 ```
 
 ### 5. Deploy

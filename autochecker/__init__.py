@@ -160,12 +160,15 @@ def check_student(
     engine = CheckEngine(client, reader, branch=check_branch, lab_spec=lab_spec,
                          server_ip=server_ip, lms_api_key=lms_api_key,
                          vm_username=vm_username)
+    from .engine import build_structured_feedback
+
     results = []
     for check_spec in code_checks:
         check_description = check_spec.title or check_spec.description or check_spec.id
         check_hint = check_spec.hint or ""
         result = engine.run_check(
-            check_spec.id, check_spec.type, check_spec.params, check_description, hint=check_hint
+            check_spec.id, check_spec.type, check_spec.params, check_description,
+            hint=check_hint, check_spec=check_spec,
         )
         results.append(result)
 
@@ -184,28 +187,28 @@ def check_student(
                     check_title=check_description,
                     client=client,
                 )
-                results.append(
-                    {
-                        "id": llm_result.get("id"),
-                        "status": llm_result.get("status", "ERROR"),
-                        "details": llm_result.get("details", ""),
-                        "description": llm_result.get("description", check_description),
-                        "score": llm_result.get("score"),
-                        "min_score": llm_result.get("min_score"),
-                        "reasons": llm_result.get("reasons", []),
-                        "quotes": llm_result.get("quotes", []),
-                    }
-                )
+                base = {
+                    "id": llm_result.get("id"),
+                    "status": llm_result.get("status", "ERROR"),
+                    "details": llm_result.get("details", ""),
+                    "description": llm_result.get("description", check_description),
+                    "hint": check_spec.hint or "",
+                    "score": llm_result.get("score"),
+                    "min_score": llm_result.get("min_score"),
+                    "reasons": llm_result.get("reasons", []),
+                    "quotes": llm_result.get("quotes", []),
+                }
+                results.append(build_structured_feedback(base, check_spec))
         except Exception as e:
             for check_spec in llm_checks:
-                results.append(
-                    {
-                        "id": check_spec.id,
-                        "status": "ERROR",
-                        "details": f"LLM analysis error: {str(e)[:100]}",
-                        "description": check_spec.title or check_spec.description or check_spec.id,
-                    }
-                )
+                base = {
+                    "id": check_spec.id,
+                    "status": "ERROR",
+                    "details": f"LLM analysis error: {str(e)[:100]}",
+                    "description": check_spec.title or check_spec.description or check_spec.id,
+                    "hint": check_spec.hint or "",
+                }
+                results.append(build_structured_feedback(base, check_spec))
 
     # Deep repo analysis (only when spec has LLM checks)
     llm_analysis = None

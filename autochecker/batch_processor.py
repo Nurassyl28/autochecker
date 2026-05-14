@@ -119,6 +119,7 @@ def process_single_student(
         
         # Run code checks via engine
         engine = CheckEngine(client, reader, branch=check_branch, lab_spec=lab_spec)
+        from .engine import build_structured_feedback
         results = []
         for check_spec in code_checks:
             # Use title if available, otherwise description, otherwise id
@@ -127,16 +128,18 @@ def process_single_student(
                 check_spec.id,
                 check_spec.type,
                 check_spec.params,
-                check_description
+                check_description,
+                hint=check_spec.hint or "",
+                check_spec=check_spec,
             )
             results.append(result)
-        
+
         # Run LLM checks (if API key is available)
         llm_analysis = None
         if openrouter_api_key and llm_checks:
             try:
                 from .llm_analyzer import run_llm_check
-                
+
                 for check_spec in llm_checks:
                     check_description = check_spec.title or check_spec.description or check_spec.id
                     llm_result = run_llm_check(
@@ -147,27 +150,30 @@ def process_single_student(
                         check_title=check_description,
                         client=client
                     )
-                    # Convert LLM result to CheckResult format
-                    results.append({
+                    base = {
                         'id': llm_result.get('id'),
                         'status': llm_result.get('status', 'ERROR'),
                         'details': llm_result.get('details', ''),
                         'description': llm_result.get('description', check_description),
+                        'hint': check_spec.hint or "",
                         'score': llm_result.get('score'),
                         'min_score': llm_result.get('min_score'),
                         'reasons': llm_result.get('reasons', []),
-                        'quotes': llm_result.get('quotes', [])
-                    })
-                
+                        'quotes': llm_result.get('quotes', []),
+                    }
+                    results.append(build_structured_feedback(base, check_spec))
+
             except Exception as e:
                 # If LLM checks failed, add error for each
                 for check_spec in llm_checks:
-                    results.append({
+                    base = {
                         'id': check_spec.id,
                         'status': 'ERROR',
                         'details': f"LLM analysis error: {str(e)[:100]}",
-                        'description': check_spec.title or check_spec.description or check_spec.id
-                    })
+                        'description': check_spec.title or check_spec.description or check_spec.id,
+                        'hint': check_spec.hint or "",
+                    }
+                    results.append(build_structured_feedback(base, check_spec))
         
         # Save report
         reporter = Reporter(

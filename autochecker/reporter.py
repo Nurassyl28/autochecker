@@ -88,7 +88,7 @@ class Reporter:
         html += f"<li>⚠️ Errors: {summary['errored_checks']}</li>"
         html += "</ul>"
         html += "<h3>Details:</h3><table border='1' style='border-collapse: collapse; width: 100%;'>"
-        html += "<tr><th>ID</th><th>Type</th><th>Status</th><th>Description</th><th>Details</th></tr>"
+        html += "<tr><th>ID</th><th>Type</th><th>Status</th><th>Description</th><th>Feedback</th></tr>"
 
         for res in self._results:
             status_icon = "✅" if res['status'] == 'PASS' else "❌" if res['status'] == 'FAIL' else "⚠️"
@@ -98,13 +98,14 @@ class Reporter:
             is_llm_check = res.get('score') is not None or res.get('reasons') is not None
             check_type = "🤖 LLM" if is_llm_check else "⚙️ Code"
 
+            llm_extra = ""
             if is_llm_check:
                 score = res.get('score', '-')
                 min_score = res.get('min_score', '-')
-                details = f"Score: {score}/{5} (min: {min_score})"
+                llm_extra = f"Score: {score}/5 (min: {min_score})"
                 reasons = res.get('reasons', [])
                 if reasons:
-                    details += f"<br><small><b>Reasons:</b> {'; '.join(str(r) for r in reasons[:3])}</small>"
+                    llm_extra += f"<br><small><b>Reasons:</b> {'; '.join(str(r) for r in reasons[:3])}</small>"
                 quotes = res.get('quotes', [])
                 if quotes:
                     quote_texts = []
@@ -114,13 +115,41 @@ class Reporter:
                         else:
                             quote_texts.append(str(q)[:100])
                     if quote_texts:
-                        details += f"<br><small><b>Quotes:</b> {'; '.join(quote_texts)}</small>"
+                        llm_extra += f"<br><small><b>Quotes:</b> {'; '.join(quote_texts)}</small>"
 
-            hint = res.get('hint', '').strip()
-            if hint and res['status'] != 'PASS':
-                details = f"<b>Hint:</b> {hint}<br>{details}" if details else f"<b>Hint:</b> {hint}"
+            parts = []
+            short_reason = (res.get('short_reason') or '').strip()
+            detailed_reason = (res.get('detailed_reason') or details or '').strip()
+            likely_cause = (res.get('likely_cause') or '').strip()
+            next_steps = res.get('next_steps') or []
+            hint = (res.get('hint') or '').strip()
+            escalation_state = (res.get('escalation_state') or 'none').strip()
 
-            details_cell = f"<td style='max-width: 400px; word-wrap: break-word;'>{details}</td>" if details else "<td>-</td>"
+            if res['status'] != 'PASS':
+                if short_reason:
+                    parts.append(f"<b>What failed:</b> {short_reason}")
+                if detailed_reason and detailed_reason != short_reason:
+                    parts.append(f"<b>Details:</b> {detailed_reason}")
+                if likely_cause:
+                    parts.append(f"<b>Likely cause:</b> {likely_cause}")
+                if next_steps:
+                    steps_html = "".join(f"<li>{s}</li>" for s in next_steps)
+                    parts.append(f"<b>Next steps:</b><ul>{steps_html}</ul>")
+                if hint:
+                    parts.append(f"<b>Hint:</b> {hint}")
+                if escalation_state and escalation_state != 'none':
+                    parts.append(f"<small><i>Escalation: {escalation_state}</i></small>")
+            else:
+                if short_reason:
+                    parts.append(short_reason)
+                elif detailed_reason:
+                    parts.append(detailed_reason)
+
+            if llm_extra:
+                parts.append(llm_extra)
+
+            feedback_html = "<br>".join(parts) if parts else "-"
+            details_cell = f"<td style='max-width: 500px; word-wrap: break-word;'>{feedback_html}</td>"
             html += f"<tr><td>{res['id']}</td><td>{check_type}</td><td>{status_icon} {res['status']}</td><td>{description}</td>{details_cell}</tr>"
 
         html += "</table>"
@@ -168,22 +197,35 @@ class Reporter:
                 else:
                     lines.append(f"  {icon} {description}")
 
-                # Show hint if available
-                hint = res.get('hint', '').strip()
+                short_reason = (res.get('short_reason') or '').strip()
+                detailed_reason = (res.get('detailed_reason') or res.get('details') or '').strip()
+                likely_cause = (res.get('likely_cause') or '').strip()
+                next_steps = res.get('next_steps') or []
+                hint = (res.get('hint') or '').strip()
+                escalation_state = (res.get('escalation_state') or 'none').strip()
+
+                if short_reason:
+                    lines.append(f"    What failed: {short_reason}")
+                if detailed_reason and detailed_reason != short_reason:
+                    lines.append(f"    Details: {detailed_reason[:2000]}")
+                if likely_cause:
+                    lines.append(f"    Likely cause: {likely_cause}")
+                if next_steps:
+                    lines.append("    Next steps:")
+                    for step in next_steps:
+                        lines.append(f"      - {step}")
                 if hint:
                     for hint_line in hint.split('\n'):
-                        lines.append(f"    -> {hint_line.strip()}")
-
-                # Show details if available and different from hint
-                details = res.get('details', '').strip()
-                if details and details != hint:
-                    lines.append(f"    Details: {details[:2000]}")
+                        lines.append(f"    Hint: {hint_line.strip()}")
 
                 # Show LLM reasons if available
                 reasons = res.get('reasons', [])
                 if reasons:
                     for reason in reasons:
                         lines.append(f"    - {reason}")
+
+                if escalation_state and escalation_state != 'none':
+                    lines.append(f"    (escalation: {escalation_state})")
 
                 lines.append("")
 

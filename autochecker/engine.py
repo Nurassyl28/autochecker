@@ -7,6 +7,101 @@ from .github_client import GitHubClient
 from .repo_reader import RepoReader
 
 
+def _format_template(template: Optional[str], context: Dict[str, Any]) -> str:
+    """Safely format a template string with a context dict; unknown keys become ''."""
+    if not template:
+        return ""
+    try:
+        return template.format_map(_SafeDict(context))
+    except Exception:
+        return template
+
+
+class _SafeDict(dict):
+    def __missing__(self, key):
+        return ""
+
+
+def build_structured_feedback(
+    result: Dict[str, Any],
+    check_spec: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Enrich a raw check result dict with the StructuredFeedback schema.
+
+    Adds the fields defined in spec.StructuredFeedback:
+      status, short_reason, detailed_reason, likely_cause, next_steps,
+      hint, escalation_state.
+
+    Preserves all pre-existing keys on the result dict so older consumers
+    (HTML table, JSONL, LLM rendering) keep working. Safe to call twice —
+    existing structured keys are respected if already populated.
+    """
+    if result is None:
+        return result
+
+    status = result.get("status", "ERROR")
+    details = (result.get("details") or "").strip()
+    hint = (result.get("hint") or "").strip()
+
+    tutoring = getattr(check_spec, "tutoring", None) if check_spec is not None else None
+    escalation = getattr(check_spec, "escalation", None) if check_spec is not None else None
+
+    ctx = {
+        "id": result.get("id", ""),
+        "status": status,
+        "details": details,
+        "description": result.get("description", ""),
+        "hint": hint,
+    }
+
+    # short_reason: one-line summary
+    if "short_reason" not in result:
+        if tutoring and getattr(tutoring, "short_reason_template", None):
+            result["short_reason"] = _format_template(tutoring.short_reason_template, ctx)
+        elif status == "PASS":
+            result["short_reason"] = "Check passed."
+        elif status == "ERROR":
+            first_line = details.splitlines()[0] if details else ""
+            result["short_reason"] = first_line[:200] or "Check errored."
+        else:
+            first_line = details.splitlines()[0] if details else ""
+            result["short_reason"] = first_line[:200] or "Check failed."
+
+    # detailed_reason: full details verbatim, or template
+    if "detailed_reason" not in result:
+        if tutoring and getattr(tutoring, "detailed_reason_template", None):
+            result["detailed_reason"] = _format_template(tutoring.detailed_reason_template, ctx)
+        else:
+            result["detailed_reason"] = details
+
+    # likely_cause: only meaningful for non-PASS outcomes
+    if "likely_cause" not in result:
+        if status != "PASS" and tutoring and getattr(tutoring, "likely_cause_template", None):
+            result["likely_cause"] = _format_template(tutoring.likely_cause_template, ctx)
+        else:
+            result["likely_cause"] = ""
+
+    # next_steps: concrete actions the student can take
+    if "next_steps" not in result:
+        if status != "PASS" and tutoring and getattr(tutoring, "next_steps", None):
+            result["next_steps"] = list(tutoring.next_steps)
+        else:
+            result["next_steps"] = []
+
+    # hint preserved; ensure key exists
+    if "hint" not in result:
+        result["hint"] = hint
+
+    # escalation_state: "eligible" if spec enables escalation and the check didn't pass
+    if "escalation_state" not in result:
+        if escalation and getattr(escalation, "enabled", False) and status != "PASS":
+            result["escalation_state"] = "eligible"
+        else:
+            result["escalation_state"] = "none"
+
+    return result
+
+
 def _sample_eval_questions(questions: list, sample_per_class: int) -> list:
     """Sample N questions per class from the eval pool.
 
@@ -55,7 +150,6 @@ class CheckEngine:
         self._vm_username = vm_username
         self._lab_spec = lab_spec
         self._data_cache = {}
-        self._branch = branch  # Branch to use (overrides repo default)
 
     def _get_commits(self):
         if 'commits' not in self._data_cache:
@@ -2327,8 +2421,15 @@ with open("_eval_results.json", "w") as f:
             return True, f"PR #{pr_number} has {count} review comment(s)"
         return False, f"PR #{pr_number} has {count} review comment(s), needs {min_comments}"
 
-    def run_check(self, check_id: str, check_type: str, params: Dict[str, Any], description: str = "", hint: str = "") -> CheckResult:
-        """Runs a single check by its type."""
+    def run_check(self, check_id: str, check_type: str, params: Dict[str, Any], description: str = "", hint: str = "", check_spec: Optional[Any] = None) -> CheckResult:
+        """Runs a single check by its type.
+
+        When ``check_spec`` is provided, the returned result is enriched
+        with the StructuredFeedback schema (short_reason, detailed_reason,
+        likely_cause, next_steps, escalation_state). The original keys
+        (id/status/description/details/hint) are preserved for backward
+        compatibility with older callers and reporters.
+        """
         import os
         status = "FAIL"
         details = ""
@@ -2828,5 +2929,6 @@ with open("_eval_results.json", "w") as f:
         except Exception as e:
             status = "ERROR"
             details = f"Error executing check '{check_id}': {e}"
-        
-        return CheckResult(id=check_id, status=status, details=details, description=description, hint=hint)
+
+        result = CheckResult(id=check_id, status=status, details=details, description=description, hint=hint)
+        return build_structured_feedback(result, check_spec)
