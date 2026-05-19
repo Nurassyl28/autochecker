@@ -70,3 +70,71 @@ CREATE TABLE IF NOT EXISTS api_access_log (
     timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_api_access_email ON api_access_log(tenant_id, email);
+
+CREATE TABLE IF NOT EXISTS diagnostic_events (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES universities(id),
+    tg_id BIGINT NOT NULL REFERENCES users(tg_id),
+    lab_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    check_id TEXT NOT NULL,
+    failure_taxonomy TEXT NOT NULL DEFAULT 'unclassified',
+    diagnostic_status TEXT NOT NULL DEFAULT 'missing',
+    vm_snapshot_status TEXT NOT NULL DEFAULT 'unknown',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_diag_events_lookup
+    ON diagnostic_events(tenant_id, lab_id, task_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS assignments (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES universities(id),
+    code TEXT NOT NULL,
+    title TEXT NOT NULL,
+    prompt_text TEXT NOT NULL,
+    llm_spec_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_by_email TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_assignments_tenant_code ON assignments(tenant_id, code);
+
+CREATE TABLE IF NOT EXISTS conversation_threads (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES universities(id),
+    student_tg_id BIGINT NOT NULL REFERENCES users(tg_id),
+    teacher_tg_id BIGINT NOT NULL REFERENCES users(tg_id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_threads_tenant_lookup
+    ON conversation_threads(tenant_id, student_tg_id, teacher_tg_id);
+
+CREATE TABLE IF NOT EXISTS conversation_messages (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES universities(id),
+    thread_id BIGINT NOT NULL REFERENCES conversation_threads(id),
+    sender_role TEXT NOT NULL,
+    sender_email TEXT NOT NULL,
+    body TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_messages_thread_created
+    ON conversation_messages(tenant_id, thread_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS assignment_submissions (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES universities(id),
+    tg_id BIGINT NOT NULL REFERENCES users(tg_id),
+    assignment_code TEXT NOT NULL,
+    repo_url TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    source TEXT NOT NULL DEFAULT 'telegram',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    processed_at TIMESTAMPTZ NULL,
+    result_text TEXT NOT NULL DEFAULT '',
+    error_message TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_assignment_submissions_lookup
+    ON assignment_submissions(tenant_id, tg_id, assignment_code, created_at DESC);

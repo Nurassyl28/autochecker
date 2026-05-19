@@ -60,7 +60,7 @@ class User:
 #   0 — legacy (users: tg_id, student_name, github_nick, is_admin)
 #   1 — self-registration + results table
 # ---------------------------------------------------------------------------
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 12
 
 
 async def _get_table_columns(db: aiosqlite.Connection, table: str) -> set[str]:
@@ -125,6 +125,12 @@ async def init_db() -> None:
             await _migrate_to_v8(db)
         if version < 9:
             await _migrate_to_v9(db)
+        if version < 10:
+            await _migrate_to_v10(db)
+        if version < 11:
+            await _migrate_to_v11(db)
+        if version < 12:
+            await _migrate_to_v12(db)
 
         await _set_schema_version(db, SCHEMA_VERSION)
         await db.commit()
@@ -342,6 +348,81 @@ async def _migrate_to_v9(db: aiosqlite.Connection) -> None:
     await db.execute("CREATE INDEX IF NOT EXISTS idx_attempts_tenant ON attempts(tenant_id)")
     await db.execute("CREATE INDEX IF NOT EXISTS idx_attempt_grants_tenant ON attempt_grants(tenant_id)")
     logger.info("Migration to v9 complete")
+
+
+async def _migrate_to_v10(db: aiosqlite.Connection) -> None:
+    """Add normalized diagnostic_events table for analytics/observability."""
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS diagnostic_events (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            tenant_id          TEXT NOT NULL DEFAULT 'default',
+            tg_id              INTEGER NOT NULL,
+            lab_id             TEXT NOT NULL,
+            task_id            TEXT NOT NULL,
+            check_id           TEXT NOT NULL,
+            failure_taxonomy   TEXT NOT NULL DEFAULT 'unclassified',
+            diagnostic_status  TEXT NOT NULL DEFAULT 'missing',
+            vm_snapshot_status TEXT NOT NULL DEFAULT 'unknown',
+            created_at         DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    await db.execute(
+        """CREATE INDEX IF NOT EXISTS idx_diag_events_lookup
+           ON diagnostic_events(tenant_id, lab_id, task_id, created_at DESC)"""
+    )
+    logger.info("Migration to v10 complete")
+
+
+async def _migrate_to_v11(db: aiosqlite.Connection) -> None:
+    """Add assignment catalog + submission queue tables for Telegram flow."""
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS assignments (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            tenant_id        TEXT NOT NULL DEFAULT 'default',
+            code             TEXT NOT NULL,
+            title            TEXT NOT NULL,
+            prompt_text      TEXT NOT NULL,
+            llm_spec_json    TEXT NOT NULL DEFAULT '{}',
+            is_active        INTEGER NOT NULL DEFAULT 1,
+            created_by_email TEXT NOT NULL,
+            created_at       DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    await db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_assignments_tenant_code ON assignments(tenant_id, code)"
+    )
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS assignment_submissions (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            tenant_id         TEXT NOT NULL DEFAULT 'default',
+            tg_id             INTEGER NOT NULL,
+            assignment_code   TEXT NOT NULL,
+            repo_url          TEXT NOT NULL,
+            status            TEXT NOT NULL DEFAULT 'queued',
+            source            TEXT NOT NULL DEFAULT 'telegram',
+            created_at        DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    await db.execute(
+        """CREATE INDEX IF NOT EXISTS idx_assignment_submissions_lookup
+           ON assignment_submissions(tenant_id, tg_id, assignment_code, created_at DESC)"""
+    )
+    logger.info("Migration to v11 complete")
+
+
+async def _migrate_to_v12(db: aiosqlite.Connection) -> None:
+    """Add processing/result fields for assignment submission worker."""
+    cols = await _get_table_columns(db, "assignment_submissions")
+    if cols:
+        if "updated_at" not in cols:
+            await db.execute("ALTER TABLE assignment_submissions ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP")
+        if "processed_at" not in cols:
+            await db.execute("ALTER TABLE assignment_submissions ADD COLUMN processed_at DATETIME DEFAULT NULL")
+        if "result_text" not in cols:
+            await db.execute("ALTER TABLE assignment_submissions ADD COLUMN result_text TEXT DEFAULT ''")
+        if "error_message" not in cols:
+            await db.execute("ALTER TABLE assignment_submissions ADD COLUMN error_message TEXT DEFAULT ''")
+    logger.info("Migration to v12 complete")
 
 
 async def get_vm_username(tg_id: int) -> str:
@@ -861,6 +942,192 @@ async def save_result(
             """INSERT INTO results (tg_id, lab_id, task_id, score, passed, failed, total, details, tenant_id, timestamp)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (tg_id, lab_id, task_id, score, passed, failed, total, details or "", DEFAULT_TENANT_ID, datetime.now().isoformat())
+        )
+        await db.commit()
+
+
+async def save_diagnostic_events(
+    tg_id: int,
+    lab_id: str,
+    task_id: str,
+    details: Optional[str],
+) -> int:
+    """Persist normalized diagnostic events extracted from result details."""
+    if not details:
+        return 0
+    try:
+        import json as _json
+        checks = _json.loads(details)
+    except Exception:
+        return 0
+    if not isinstance(checks, list):
+        return 0
+
+    events = []
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        diagnostic = check.get("diagnostic")
+        if not isinstance(diagnostic, dict):
+            continue
+        sources = diagnostic.get("sources") if isinstance(diagnostic.get("sources"), dict) else {}
+        events.append(
+            (
+                DEFAULT_TENANT_ID,
+                tg_id,
+                lab_id,
+                task_id,
+                str(check.get("id") or diagnostic.get("check_id") or "unknown_check"),
+                str(diagnostic.get("failure_taxonomy") or check.get("failure_taxonomy") or "unclassified"),
+                str(diagnostic.get("diagnostic_status") or "missing"),
+                str(sources.get("vm_snapshot") or "unknown"),
+            )
+        )
+
+    if not events:
+        return 0
+
+    if USE_POSTGRES:
+        for ev in events:
+            await asyncio.to_thread(
+                _pg_execute_sync,
+                """INSERT INTO diagnostic_events
+                   (tenant_id, tg_id, lab_id, task_id, check_id, failure_taxonomy, diagnostic_status, vm_snapshot_status)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                ev,
+            )
+        return len(events)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executemany(
+            """INSERT INTO diagnostic_events
+               (tenant_id, tg_id, lab_id, task_id, check_id, failure_taxonomy, diagnostic_status, vm_snapshot_status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            events,
+        )
+        await db.commit()
+    return len(events)
+
+
+async def get_active_assignments(tenant_id: str = DEFAULT_TENANT_ID) -> list[dict]:
+    """List active assignments for a tenant."""
+    if USE_POSTGRES:
+        return await asyncio.to_thread(
+            _pg_fetchall_sync,
+            """SELECT code, title, prompt_text, llm_spec_json, created_at
+               FROM assignments
+               WHERE tenant_id = %s AND is_active = TRUE
+               ORDER BY created_at DESC""",
+            (tenant_id,),
+        )
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT code, title, prompt_text, llm_spec_json, created_at
+               FROM assignments
+               WHERE tenant_id = ? AND is_active = 1
+               ORDER BY created_at DESC""",
+            (tenant_id,),
+        ) as cur:
+            return [dict(r) async for r in cur]
+
+
+async def create_assignment_submission(
+    tg_id: int,
+    tenant_id: str,
+    assignment_code: str,
+    repo_url: str,
+    source: str = "telegram",
+) -> int:
+    """Create queued assignment submission; returns new submission id."""
+    clean_code = assignment_code.strip().lower()
+    clean_repo = repo_url.strip()
+    if USE_POSTGRES:
+        await asyncio.to_thread(
+            _pg_execute_sync,
+            """INSERT INTO assignment_submissions
+               (tenant_id, tg_id, assignment_code, repo_url, status, source)
+               VALUES (%s, %s, %s, %s, %s, %s)""",
+            (tenant_id, tg_id, clean_code, clean_repo, "queued", source),
+        )
+        row = await asyncio.to_thread(
+            _pg_fetchone_sync,
+            """SELECT id FROM assignment_submissions
+               WHERE tenant_id = %s AND tg_id = %s AND assignment_code = %s
+               ORDER BY id DESC LIMIT 1""",
+            (tenant_id, tg_id, clean_code),
+        )
+        return int(row["id"]) if row else 0
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """INSERT INTO assignment_submissions
+               (tenant_id, tg_id, assignment_code, repo_url, status, source)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (tenant_id, tg_id, clean_code, clean_repo, "queued", source),
+        )
+        await db.commit()
+        return int(cur.lastrowid or 0)
+
+
+async def fetch_queued_submissions(limit: int = 10, tenant_id: str = DEFAULT_TENANT_ID) -> list[dict]:
+    """Fetch oldest queued submissions for worker processing."""
+    lim = max(1, min(limit, 100))
+    if USE_POSTGRES:
+        return await asyncio.to_thread(
+            _pg_fetchall_sync,
+            """SELECT id, tenant_id, tg_id, assignment_code, repo_url, status, source, created_at
+               FROM assignment_submissions
+               WHERE tenant_id = %s AND status = 'queued'
+               ORDER BY id ASC
+               LIMIT %s""",
+            (tenant_id, lim),
+        )
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT id, tenant_id, tg_id, assignment_code, repo_url, status, source, created_at
+               FROM assignment_submissions
+               WHERE tenant_id = ? AND status = 'queued'
+               ORDER BY id ASC
+               LIMIT ?""",
+            (tenant_id, lim),
+        ) as cur:
+            return [dict(r) async for r in cur]
+
+
+async def update_submission_status(
+    submission_id: int,
+    status: str,
+    *,
+    result_text: str = "",
+    error_message: str = "",
+    tenant_id: str = DEFAULT_TENANT_ID,
+) -> None:
+    """Update submission lifecycle status."""
+    processed_at = datetime.now().isoformat() if status in {"done", "failed"} else None
+    if USE_POSTGRES:
+        await asyncio.to_thread(
+            _pg_execute_sync,
+            """UPDATE assignment_submissions
+               SET status = %s,
+                   updated_at = NOW(),
+                   processed_at = COALESCE(%s, processed_at),
+                   result_text = %s,
+                   error_message = %s
+               WHERE tenant_id = %s AND id = %s""",
+            (status, processed_at, result_text, error_message, tenant_id, submission_id),
+        )
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """UPDATE assignment_submissions
+               SET status = ?,
+                   updated_at = CURRENT_TIMESTAMP,
+                   processed_at = COALESCE(?, processed_at),
+                   result_text = ?,
+                   error_message = ?
+               WHERE tenant_id = ? AND id = ?""",
+            (status, processed_at, result_text, error_message, tenant_id, submission_id),
         )
         await db.commit()
 

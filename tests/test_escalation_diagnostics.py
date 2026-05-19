@@ -48,6 +48,7 @@ def test_deep_diagnostics_enriches_triggered_checks(monkeypatch):
     assert diag["sources"]["check_data"] == "ok"
     assert diag["sources"]["vm_snapshot"] in {"ok", "failed", "unavailable", "skipped"}
     assert diag["diagnostic_status"] in {"complete", "partial", "degraded", "missing"}
+    assert diag["vm_snapshot"]["probe_profile"] == "missing_resource"
     assert "vm_snapshot" in diag
 
 

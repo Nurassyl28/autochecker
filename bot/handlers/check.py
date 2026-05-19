@@ -16,7 +16,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from ..database import User, get_attempts_count, get_effective_attempt_limit, add_attempt, save_result, get_server_ip, get_server_ip_owner, set_server_ip, get_lms_api_key, set_lms_api_key, get_vm_username, set_vm_username
+from ..database import User, get_attempts_count, get_effective_attempt_limit, add_attempt, save_result, save_diagnostic_events, get_server_ip, get_server_ip_owner, set_server_ip, get_lms_api_key, set_lms_api_key, get_vm_username, set_vm_username
 from ..ip_utils import validate_ip
 from ..keyboards import get_labs_keyboard, get_tasks_keyboard
 from ..runner import run_check
@@ -32,6 +32,68 @@ router = Router()
 
 
 AUTOCHECKER_PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKiL0DDQZw7L0Uf1c9cNlREY7IS6ZkIbGVWNsClqGNCZ se-toolkit-autochecker"
+
+
+async def _persist_result_and_diagnostics(
+    *,
+    db_user: User,
+    lab_id: str,
+    task_id: str,
+    result,
+    passed: int | None,
+    failed: int | None,
+    total: int | None,
+    details_json: str,
+) -> None:
+    """Persist check result and normalized diagnostic events in one place."""
+    await save_result(
+        tg_id=db_user.tg_id,
+        lab_id=lab_id,
+        task_id=task_id,
+        score=result.score,
+        passed=passed,
+        failed=failed,
+        total=total,
+        details=details_json,
+    )
+    await save_diagnostic_events(
+        tg_id=db_user.tg_id,
+        lab_id=lab_id,
+        task_id=task_id,
+        details=details_json,
+    )
+
+
+async def _send_student_feedback(target, result, task_id: str) -> None:
+    """Send student-facing report text/file with safe fallbacks."""
+    if result.student_report_path and result.student_report_path.exists():
+        try:
+            report_text = result.student_report_path.read_text(encoding="utf-8")
+            if len(report_text) <= 4000:
+                await target.answer(f"<pre>{report_text}</pre>")
+            else:
+                await target.answer_document(
+                    FSInputFile(result.student_report_path, filename="report.txt"),
+                    caption=f"Report for {task_id}",
+                )
+        except (TelegramBadRequest, Exception):
+            try:
+                await target.answer_document(
+                    FSInputFile(result.student_report_path, filename="report.txt"),
+                    caption=f"Report for {task_id}",
+                )
+            except TelegramBadRequest:
+                pass
+        return
+
+    if result.summary_html_path and result.summary_html_path.exists():
+        summary = _parse_summary_html(result.summary_html_path)
+        if summary:
+            await target.answer(summary)
+            return
+
+    if not result.score:
+        await target.answer("No results were generated. Check your repository setup.")
 
 
 def _check_vm_reachable_sync(ip: str) -> tuple[bool, str]:
@@ -238,23 +300,31 @@ def collect_log_evidence(student_report_excerpt: str, summary_excerpt: str) -> d
     }
 
 
-def collect_vm_evidence(server_ip: str, vm_username: str | None, timeout: int = 10) -> dict:
+def _vm_command_for_taxonomy(taxonomy: str) -> str:
+    """Return focused VM probe commands by failure taxonomy."""
+    if taxonomy == "missing_resource":
+        return "pwd; ls -la; find . -maxdepth 2 -type f | head -n 40"
+    if taxonomy in {"timeout", "runtime_error"}:
+        return "uname -a; ps aux | head -n 25; ss -lnt 2>/dev/null | head -n 20; docker ps 2>/dev/null | head -n 20"
+    if taxonomy in {"permission_access", "connectivity"}:
+        return "whoami; id; ip a 2>/dev/null | head -n 30; ip route 2>/dev/null | head -n 20"
+    return "whoami; uname -a; pwd; ls -la | head -n 20"
+
+
+def collect_vm_evidence(server_ip: str, vm_username: str | None, timeout: int = 10, taxonomy: str = "requirement_mismatch") -> dict:
     """Collect minimal VM snapshot via relay SSH with retries and explicit status."""
     relay_token = os.environ.get("RELAY_TOKEN", "")
     if not relay_token:
-        return {"status": "unavailable", "reason": "relay_token_missing"}
+        return {"status": "unavailable", "reason": "relay_token_missing", "probe_profile": taxonomy}
     if not server_ip:
-        return {"status": "skipped", "reason": "server_ip_missing"}
+        return {"status": "skipped", "reason": "server_ip_missing", "probe_profile": taxonomy}
 
     relay_url = os.environ.get("RELAY_URL", "http://dashboard:8000/relay/ssh")
     username = (vm_username or "autochecker").strip() or "autochecker"
     command = (
         "set -o pipefail; "
         "echo __DIAG_BEGIN__; "
-        "whoami; "
-        "uname -a; "
-        "pwd; "
-        "ls -la | head -n 20; "
+        f"{_vm_command_for_taxonomy(taxonomy)}; "
         "echo __DIAG_END__"
     )
 
@@ -287,13 +357,14 @@ def collect_vm_evidence(server_ip: str, vm_username: str | None, timeout: int = 
                 "host": server_ip,
                 "username": username,
                 "stdout_excerpt": stdout[:1000],
+                "probe_profile": taxonomy,
             }
         except requests.Timeout:
             last_error = "timeout"
         except Exception as exc:
             last_error = f"exception:{str(exc)[:80]}"
 
-    return {"status": "failed", "attempts": 2, "host": server_ip, "username": username, "reason": last_error}
+    return {"status": "failed", "attempts": 2, "host": server_ip, "username": username, "reason": last_error, "probe_profile": taxonomy}
 
 
 def _derive_diagnostic_status(source_status: dict[str, str]) -> str:
@@ -350,8 +421,8 @@ def _run_deep_diagnostics(
         check_id = str(check.get("id", "")).strip()
         repo_evidence = collect_repo_evidence(check)
         log_evidence = collect_log_evidence(student_report_excerpt, summary_excerpt)
-        vm_snapshot = collect_vm_evidence(server_ip or "", vm_username)
         taxonomy = _classify_failure_taxonomy(status, details, likely)
+        vm_snapshot = collect_vm_evidence(server_ip or "", vm_username, taxonomy=taxonomy)
         source_status = {
             "check_data": repo_evidence.get("status", "ok"),
             "student_report": "ok" if log_evidence.get("student_report_excerpt") else "missing",
@@ -634,16 +705,15 @@ async def callback_check_task(callback: CallbackQuery, db_user: User, state: FSM
         vm_username=vm_username or None,
     )
 
-    # Save result to DB
-    await save_result(
-        tg_id=db_user.tg_id,
+    await _persist_result_and_diagnostics(
+        db_user=db_user,
         lab_id=lab_id,
         task_id=task_id,
-        score=result.score,
+        result=result,
         passed=passed,
         failed=failed,
         total=total,
-        details=details_json,
+        details_json=details_json,
     )
 
     # Handle runner-level error (timeout, script not found)
@@ -672,36 +742,7 @@ async def callback_check_task(callback: CallbackQuery, db_user: User, state: FSM
             "Open the report for root cause and fix steps."
         )
 
-    # Send feedback to student
-    if result.student_report_path and result.student_report_path.exists():
-        # student_report.txt — clean, student-friendly, failures only
-        try:
-            report_text = result.student_report_path.read_text(encoding="utf-8")
-            if len(report_text) <= 4000:
-                await callback.message.answer(
-                    f"<pre>{report_text}</pre>",
-                )
-            else:
-                await callback.message.answer_document(
-                    FSInputFile(result.student_report_path, filename="report.txt"),
-                    caption=f"Report for {task_id}"
-                )
-        except (TelegramBadRequest, Exception):
-            try:
-                await callback.message.answer_document(
-                    FSInputFile(result.student_report_path, filename="report.txt"),
-                    caption=f"Report for {task_id}"
-                )
-            except TelegramBadRequest:
-                pass
-    elif result.summary_html_path and result.summary_html_path.exists():
-        # Fallback: parse summary.html for a short message
-        summary = _parse_summary_html(result.summary_html_path)
-        if summary:
-            await callback.message.answer(summary)
-    elif not result.score:
-        # No results at all — generic message
-        await callback.message.answer("No results were generated. Check your repository setup.")
+    await _send_student_feedback(callback.message, result, task_id)
 
     # Show tasks menu again
     await callback.message.answer(
@@ -791,9 +832,15 @@ async def process_server_ip(message: Message, db_user: User, state: FSMContext) 
         vm_username=None,
     )
 
-    await save_result(
-        tg_id=db_user.tg_id, lab_id=lab_id, task_id=task_id,
-        score=result.score, passed=passed, failed=failed, total=total, details=details_json,
+    await _persist_result_and_diagnostics(
+        db_user=db_user,
+        lab_id=lab_id,
+        task_id=task_id,
+        result=result,
+        passed=passed,
+        failed=failed,
+        total=total,
+        details_json=details_json,
     )
 
     if result.error_message:
@@ -820,30 +867,7 @@ async def process_server_ip(message: Message, db_user: User, state: FSMContext) 
             "Open the report for root cause and fix steps."
         )
 
-    if result.student_report_path and result.student_report_path.exists():
-        try:
-            report_text = result.student_report_path.read_text(encoding="utf-8")
-            if len(report_text) <= 4000:
-                await message.answer(f"<pre>{report_text}</pre>")
-            else:
-                await message.answer_document(
-                    FSInputFile(result.student_report_path, filename="report.txt"),
-                    caption=f"Report for {task_id}"
-                )
-        except (TelegramBadRequest, Exception):
-            try:
-                await message.answer_document(
-                    FSInputFile(result.student_report_path, filename="report.txt"),
-                    caption=f"Report for {task_id}"
-                )
-            except TelegramBadRequest:
-                pass
-    elif result.summary_html_path and result.summary_html_path.exists():
-        summary = _parse_summary_html(result.summary_html_path)
-        if summary:
-            await message.answer(summary)
-    elif not result.score:
-        await message.answer("No results were generated. Check your repository setup.")
+    await _send_student_feedback(message, result, task_id)
 
     await message.answer(
         "Choose a task:",
@@ -922,9 +946,15 @@ async def process_vm_username(message: Message, db_user: User, state: FSMContext
         vm_username=text,
     )
 
-    await save_result(
-        tg_id=db_user.tg_id, lab_id=lab_id, task_id=task_id,
-        score=result.score, passed=passed, failed=failed, total=total, details=details_json,
+    await _persist_result_and_diagnostics(
+        db_user=db_user,
+        lab_id=lab_id,
+        task_id=task_id,
+        result=result,
+        passed=passed,
+        failed=failed,
+        total=total,
+        details_json=details_json,
     )
 
     if result.error_message:
@@ -951,30 +981,7 @@ async def process_vm_username(message: Message, db_user: User, state: FSMContext
             "Open the report for root cause and fix steps."
         )
 
-    if result.student_report_path and result.student_report_path.exists():
-        try:
-            report_text = result.student_report_path.read_text(encoding="utf-8")
-            if len(report_text) <= 4000:
-                await message.answer(f"<pre>{report_text}</pre>")
-            else:
-                await message.answer_document(
-                    FSInputFile(result.student_report_path, filename="report.txt"),
-                    caption=f"Report for {task_id}"
-                )
-        except (TelegramBadRequest, Exception):
-            try:
-                await message.answer_document(
-                    FSInputFile(result.student_report_path, filename="report.txt"),
-                    caption=f"Report for {task_id}"
-                )
-            except TelegramBadRequest:
-                pass
-    elif result.summary_html_path and result.summary_html_path.exists():
-        summary = _parse_summary_html(result.summary_html_path)
-        if summary:
-            await message.answer(summary)
-    elif not result.score:
-        await message.answer("No results were generated. Check your repository setup.")
+    await _send_student_feedback(message, result, task_id)
 
     await message.answer(
         "Choose a task:",
@@ -1034,9 +1041,15 @@ async def process_lms_key(message: Message, db_user: User, state: FSMContext) ->
         vm_username=vm_username or None,
     )
 
-    await save_result(
-        tg_id=db_user.tg_id, lab_id=lab_id, task_id=task_id,
-        score=result.score, passed=passed, failed=failed, total=total, details=details_json,
+    await _persist_result_and_diagnostics(
+        db_user=db_user,
+        lab_id=lab_id,
+        task_id=task_id,
+        result=result,
+        passed=passed,
+        failed=failed,
+        total=total,
+        details_json=details_json,
     )
 
     if result.error_message:
@@ -1063,30 +1076,7 @@ async def process_lms_key(message: Message, db_user: User, state: FSMContext) ->
             "Open the report for root cause and fix steps."
         )
 
-    if result.student_report_path and result.student_report_path.exists():
-        try:
-            report_text = result.student_report_path.read_text(encoding="utf-8")
-            if len(report_text) <= 4000:
-                await message.answer(f"<pre>{report_text}</pre>")
-            else:
-                await message.answer_document(
-                    FSInputFile(result.student_report_path, filename="report.txt"),
-                    caption=f"Report for {task_id}"
-                )
-        except (TelegramBadRequest, Exception):
-            try:
-                await message.answer_document(
-                    FSInputFile(result.student_report_path, filename="report.txt"),
-                    caption=f"Report for {task_id}"
-                )
-            except TelegramBadRequest:
-                pass
-    elif result.summary_html_path and result.summary_html_path.exists():
-        summary = _parse_summary_html(result.summary_html_path)
-        if summary:
-            await message.answer(summary)
-    elif not result.score:
-        await message.answer("No results were generated. Check your repository setup.")
+    await _send_student_feedback(message, result, task_id)
 
     await message.answer(
         "Choose a task:",

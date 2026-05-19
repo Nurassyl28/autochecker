@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -93,6 +94,47 @@ def test_database_core_flow_sqlite(tmp_path, monkeypatch):
         )
     )
     assert _run(dbm.has_passed_task(tg_id, lab_id, task_id)) is True
+
+    diag_details = json.dumps(
+        [
+            {
+                "id": "check-1",
+                "status": "FAIL",
+                "diagnostic": {
+                    "failure_taxonomy": "runtime_error",
+                    "diagnostic_status": "degraded",
+                    "sources": {"vm_snapshot": "failed"},
+                },
+            }
+        ]
+    )
+    inserted = _run(dbm.save_diagnostic_events(tg_id, lab_id, task_id, diag_details))
+    assert inserted == 1
+
+    # University assignment catalog + submission queue
+    # Use raw SQL insert for assignment seed in SQLite smoke
+    import aiosqlite
+    async def _seed_assignment():
+        async with aiosqlite.connect(str(db_file)) as db:
+            await db.execute(
+                """INSERT INTO assignments (tenant_id, code, title, prompt_text, llm_spec_json, is_active, created_by_email)
+                   VALUES (?, ?, ?, ?, ?, 1, ?)""",
+                ("default", "task-a", "Task A", "Build API", "{}", "admin@u"),
+            )
+            await db.commit()
+    _run(_seed_assignment())
+    assignments = _run(dbm.get_active_assignments("default"))
+    assert assignments and assignments[0]["code"] == "task-a"
+    submission_id = _run(
+        dbm.create_assignment_submission(
+            tg_id=tg_id,
+            tenant_id="default",
+            assignment_code="task-a",
+            repo_url="https://github.com/example/repo",
+            source="telegram",
+        )
+    )
+    assert submission_id > 0
 
     stats = _run(dbm.get_task_stats(tg_id))
     key = f"{lab_id}:{task_id}"

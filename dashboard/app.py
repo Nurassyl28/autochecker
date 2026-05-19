@@ -38,6 +38,8 @@ DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
 RELAY_TOKEN = os.getenv("RELAY_TOKEN", "")
 MAX_ATTEMPTS_PER_TASK = int(os.getenv("MAX_ATTEMPTS_PER_TASK", "20"))
 MAX_ATTEMPTS_EVAL_TASK = int(os.getenv("MAX_ATTEMPTS_EVAL_TASK", "20"))
+DIAG_DEGRADED_RATE_ALERT = float(os.getenv("DIAG_DEGRADED_RATE_ALERT", "0.25"))
+DIAG_VM_FAILURE_RATE_ALERT = float(os.getenv("DIAG_VM_FAILURE_RATE_ALERT", "0.20"))
 
 COOKIE_NAME = "dash_auth"
 
@@ -109,6 +111,105 @@ async def _ensure_dashboard_tables():
                 _pg_execute_sync,
                 "CREATE INDEX IF NOT EXISTS idx_attempt_grants_lookup ON attempt_grants(tenant_id, tg_id, lab_id, task_id)",
             )
+            await asyncio.to_thread(
+                _pg_execute_sync,
+                """
+                CREATE TABLE IF NOT EXISTS diagnostic_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
+                    tg_id BIGINT NOT NULL,
+                    lab_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    check_id TEXT NOT NULL,
+                    failure_taxonomy TEXT NOT NULL DEFAULT 'unclassified',
+                    diagnostic_status TEXT NOT NULL DEFAULT 'missing',
+                    vm_snapshot_status TEXT NOT NULL DEFAULT 'unknown',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """,
+            )
+            await asyncio.to_thread(
+                _pg_execute_sync,
+                "CREATE INDEX IF NOT EXISTS idx_diag_events_lookup ON diagnostic_events(tenant_id, lab_id, task_id, created_at DESC)",
+            )
+            await asyncio.to_thread(
+                _pg_execute_sync,
+                """
+                CREATE TABLE IF NOT EXISTS assignments (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
+                    code TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    prompt_text TEXT NOT NULL,
+                    llm_spec_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_by_email TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """,
+            )
+            await asyncio.to_thread(
+                _pg_execute_sync,
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_assignments_tenant_code ON assignments(tenant_id, code)",
+            )
+            await asyncio.to_thread(
+                _pg_execute_sync,
+                """
+                CREATE TABLE IF NOT EXISTS conversation_threads (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
+                    student_tg_id BIGINT NOT NULL,
+                    teacher_tg_id BIGINT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """,
+            )
+            await asyncio.to_thread(
+                _pg_execute_sync,
+                "CREATE INDEX IF NOT EXISTS idx_threads_tenant_lookup ON conversation_threads(tenant_id, student_tg_id, teacher_tg_id)",
+            )
+            await asyncio.to_thread(
+                _pg_execute_sync,
+                """
+                CREATE TABLE IF NOT EXISTS conversation_messages (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
+                    thread_id BIGINT NOT NULL,
+                    sender_role TEXT NOT NULL,
+                    sender_email TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """,
+            )
+            await asyncio.to_thread(
+                _pg_execute_sync,
+                "CREATE INDEX IF NOT EXISTS idx_messages_thread_created ON conversation_messages(tenant_id, thread_id, created_at DESC)",
+            )
+            await asyncio.to_thread(
+                _pg_execute_sync,
+                """
+                CREATE TABLE IF NOT EXISTS assignment_submissions (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
+                    tg_id BIGINT NOT NULL,
+                    assignment_code TEXT NOT NULL,
+                    repo_url TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    source TEXT NOT NULL DEFAULT 'telegram',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    processed_at TIMESTAMPTZ NULL,
+                    result_text TEXT NOT NULL DEFAULT '',
+                    error_message TEXT NOT NULL DEFAULT ''
+                )
+                """,
+            )
+            await asyncio.to_thread(
+                _pg_execute_sync,
+                "CREATE INDEX IF NOT EXISTS idx_assignment_submissions_lookup ON assignment_submissions(tenant_id, tg_id, assignment_code, created_at DESC)",
+            )
             return
 
         async with aiosqlite.connect(DB_PATH) as db:
@@ -142,8 +243,88 @@ async def _ensure_dashboard_tables():
                 """CREATE INDEX IF NOT EXISTS idx_attempt_grants_lookup
                    ON attempt_grants(tg_id, lab_id, task_id)"""
             )
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS diagnostic_events (
+                    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id          TEXT NOT NULL DEFAULT 'default',
+                    tg_id              INTEGER NOT NULL,
+                    lab_id             TEXT NOT NULL,
+                    task_id            TEXT NOT NULL,
+                    check_id           TEXT NOT NULL,
+                    failure_taxonomy   TEXT NOT NULL DEFAULT 'unclassified',
+                    diagnostic_status  TEXT NOT NULL DEFAULT 'missing',
+                    vm_snapshot_status TEXT NOT NULL DEFAULT 'unknown',
+                    created_at         DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            await db.execute(
+                """CREATE INDEX IF NOT EXISTS idx_diag_events_lookup
+                   ON diagnostic_events(tenant_id, lab_id, task_id, created_at)"""
+            )
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS assignments (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id        TEXT NOT NULL DEFAULT 'default',
+                    code             TEXT NOT NULL,
+                    title            TEXT NOT NULL,
+                    prompt_text      TEXT NOT NULL,
+                    llm_spec_json    TEXT NOT NULL DEFAULT '{}',
+                    is_active        INTEGER NOT NULL DEFAULT 1,
+                    created_by_email TEXT NOT NULL,
+                    created_at       DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            await db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_assignments_tenant_code ON assignments(tenant_id, code)"
+            )
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS conversation_threads (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id     TEXT NOT NULL DEFAULT 'default',
+                    student_tg_id INTEGER NOT NULL,
+                    teacher_tg_id INTEGER NOT NULL,
+                    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_threads_tenant_lookup ON conversation_threads(tenant_id, student_tg_id, teacher_tg_id)"
+            )
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS conversation_messages (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id    TEXT NOT NULL DEFAULT 'default',
+                    thread_id    INTEGER NOT NULL,
+                    sender_role  TEXT NOT NULL,
+                    sender_email TEXT NOT NULL,
+                    body         TEXT NOT NULL,
+                    created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_thread_created ON conversation_messages(tenant_id, thread_id, created_at)"
+            )
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS assignment_submissions (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id       TEXT NOT NULL DEFAULT 'default',
+                    tg_id           INTEGER NOT NULL,
+                    assignment_code TEXT NOT NULL,
+                    repo_url        TEXT NOT NULL,
+                    status          TEXT NOT NULL DEFAULT 'queued',
+                    source          TEXT NOT NULL DEFAULT 'telegram',
+                    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    processed_at    DATETIME DEFAULT NULL,
+                    result_text     TEXT NOT NULL DEFAULT '',
+                    error_message   TEXT NOT NULL DEFAULT ''
+                )
+            """)
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_assignment_submissions_lookup ON assignment_submissions(tenant_id, tg_id, assignment_code, created_at)"
+            )
             # Compat for older DBs created before tenant_id columns existed
-            for table in ("users", "results", "attempts", "attempt_grants", "api_access_log"):
+            for table in ("users", "results", "attempts", "attempt_grants", "api_access_log", "diagnostic_events", "assignments", "conversation_threads", "conversation_messages", "assignment_submissions"):
                 async with db.execute(f"PRAGMA table_info({table})") as cur:
                     cols = [row[1] async for row in cur]
                 if cols and "tenant_id" not in cols:
@@ -1177,6 +1358,10 @@ def _is_teacher_role(role: str) -> bool:
     return role in {"teacher", "university_admin", "superadmin"}
 
 
+def _is_university_admin_role(role: str) -> bool:
+    return role in {"university_admin", "superadmin"}
+
+
 def _resolve_scope_tenant(auth_ctx: dict, requested_tenant_id: Optional[str]) -> str:
     """Return tenant scope for the request with superadmin override support."""
     if auth_ctx["role"] == "superadmin" and requested_tenant_id:
@@ -1186,6 +1371,12 @@ def _resolve_scope_tenant(auth_ctx: dict, requested_tenant_id: Optional[str]) ->
 
 def _require_teacher_role(auth_ctx: dict) -> Optional[JSONResponse]:
     if not _is_teacher_role(auth_ctx["role"]):
+        return _forbidden()
+    return None
+
+
+def _require_university_admin_role(auth_ctx: dict) -> Optional[JSONResponse]:
+    if not _is_university_admin_role(auth_ctx["role"]):
         return _forbidden()
     return None
 
@@ -1272,6 +1463,142 @@ def _extract_taxonomy_from_pattern(pattern: str) -> str:
     if marker not in pattern:
         return "unclassified"
     return pattern.split(marker, 1)[1].strip() or "unclassified"
+
+
+def _build_lightweight_llm_spec(prompt_text: str) -> dict[str, Any]:
+    """Build a compact normalized rubric/spec from a plain-text assignment prompt."""
+    text = (prompt_text or "").strip()
+    lines = [ln.strip("-• ").strip() for ln in text.splitlines() if ln.strip()]
+    objectives = lines[:8]
+    checks = []
+    for idx, obj in enumerate(objectives, start=1):
+        checks.append({
+            "id": f"auto-check-{idx}",
+            "criterion": obj[:200],
+            "required": True,
+        })
+    return {
+        "version": "v1",
+        "mode": "llm_compact",
+        "objectives": objectives,
+        "checks": checks,
+        "pass_rule": "all_required_or_teacher_override",
+    }
+
+
+async def _get_user_identity_by_email(email: str, tenant_id: str) -> Optional[dict]:
+    if USE_POSTGRES:
+        return await asyncio.to_thread(
+            _pg_fetchone_sync,
+            "SELECT tg_id, github_alias, role FROM users WHERE tenant_id = %s AND email = %s",
+            (tenant_id, email),
+        )
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT tg_id, github_alias, role FROM users WHERE tenant_id = ? AND email = ?",
+            (tenant_id, email),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def _get_user_identity_by_github(github_alias: str, tenant_id: str) -> Optional[dict]:
+    if USE_POSTGRES:
+        return await asyncio.to_thread(
+            _pg_fetchone_sync,
+            "SELECT tg_id, github_alias, role FROM users WHERE tenant_id = %s AND github_alias = %s",
+            (tenant_id, github_alias),
+        )
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT tg_id, github_alias, role FROM users WHERE tenant_id = ? AND github_alias = ?",
+            (tenant_id, github_alias),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def _load_diagnostic_observability(
+    tenant_id: str,
+    hours: int = 24,
+    lab_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Aggregate diagnostic_events for observability and alerting."""
+    hours = max(1, min(hours, 24 * 30))
+    params: list[Any] = [tenant_id, hours]
+    lab_clause_pg = ""
+    lab_clause_sqlite = ""
+    if lab_id:
+        lab_clause_pg = " AND lab_id = %s"
+        lab_clause_sqlite = " AND lab_id = ?"
+        params.append(lab_id)
+
+    if USE_POSTGRES:
+        rows = await asyncio.to_thread(
+            _pg_fetchall_sync,
+            f"""
+            SELECT failure_taxonomy, diagnostic_status, vm_snapshot_status, COUNT(*) AS cnt
+            FROM diagnostic_events
+            WHERE tenant_id = %s
+              AND created_at >= NOW() - (%s || ' hours')::interval
+              {lab_clause_pg}
+            GROUP BY failure_taxonomy, diagnostic_status, vm_snapshot_status
+            """,
+            tuple(params),
+        )
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            query = f"""
+                SELECT failure_taxonomy, diagnostic_status, vm_snapshot_status, COUNT(*) AS cnt
+                FROM diagnostic_events
+                WHERE tenant_id = ?
+                  AND created_at >= datetime('now', '-' || ? || ' hours')
+                  {lab_clause_sqlite}
+                GROUP BY failure_taxonomy, diagnostic_status, vm_snapshot_status
+            """
+            async with db.execute(query, tuple(params)) as cur:
+                rows = [dict(r) async for r in cur]
+
+    total = 0
+    degraded = 0
+    vm_fail = 0
+    by_taxonomy: Counter[str] = Counter()
+    by_diag_status: Counter[str] = Counter()
+    for row in rows:
+        cnt = int(row.get("cnt") or 0)
+        total += cnt
+        tax = str(row.get("failure_taxonomy") or "unclassified")
+        dstatus = str(row.get("diagnostic_status") or "missing")
+        vm = str(row.get("vm_snapshot_status") or "unknown")
+        by_taxonomy[tax] += cnt
+        by_diag_status[dstatus] += cnt
+        if dstatus in {"degraded", "missing"}:
+            degraded += cnt
+        if vm in {"failed", "unavailable"}:
+            vm_fail += cnt
+
+    degraded_rate = round((degraded / total), 4) if total else 0.0
+    vm_failure_rate = round((vm_fail / total), 4) if total else 0.0
+    return {
+        "window_hours": hours,
+        "lab_id": lab_id or "all",
+        "total_events": total,
+        "diagnostic_status_breakdown": dict(by_diag_status),
+        "failure_taxonomy_breakdown": dict(by_taxonomy),
+        "degraded_rate": degraded_rate,
+        "vm_failure_rate": vm_failure_rate,
+        "alerts": {
+            "degraded_rate_high": degraded_rate >= DIAG_DEGRADED_RATE_ALERT,
+            "vm_failure_rate_high": vm_failure_rate >= DIAG_VM_FAILURE_RATE_ALERT,
+        },
+        "thresholds": {
+            "degraded_rate_alert": DIAG_DEGRADED_RATE_ALERT,
+            "vm_failure_rate_alert": DIAG_VM_FAILURE_RATE_ALERT,
+        },
+    }
 
 
 async def _load_latest_results_rows(
@@ -1820,6 +2147,505 @@ async def api_teacher_summary_cohort(
         "failure_taxonomy_breakdown": dict(taxonomy_counter),
         "interventions": interventions,
     })
+
+
+@app.get("/api/teacher/diagnostics/observability")
+async def api_teacher_diagnostics_observability(
+    request: Request,
+    tenant_id: Optional[str] = Query(default=None),
+    hours: int = Query(default=24, ge=1, le=24 * 30),
+    lab_id: Optional[str] = Query(default=None),
+):
+    """Teacher-facing observability snapshot for diagnostic events."""
+    auth_ctx = await _verify_basic_auth(request)
+    if not auth_ctx:
+        return JSONResponse(
+            {"error": "unauthorized"},
+            status_code=401,
+            headers={"WWW-Authenticate": "Basic realm=\"autochecker\""},
+        )
+    role_err = _require_teacher_role(auth_ctx)
+    if role_err:
+        return role_err
+    scope_tenant = _resolve_scope_tenant(auth_ctx, tenant_id)
+    await _log_api_access(
+        auth_ctx["email"],
+        f"/api/teacher/diagnostics/observability?hours={hours}&lab_id={lab_id or ''}",
+        scope_tenant,
+    )
+    payload = await _load_diagnostic_observability(scope_tenant, hours=hours, lab_id=lab_id)
+    payload["tenant_id"] = scope_tenant
+    return JSONResponse(payload)
+
+
+@app.post("/api/admin/assignments")
+async def api_admin_create_assignment(
+    request: Request,
+    code: str = Form(...),
+    title: str = Form(...),
+    prompt_text: str = Form(...),
+    tenant_id: Optional[str] = Form(default=None),
+):
+    """Create an assignment for a university tenant from plain prompt text."""
+    auth_ctx = await _verify_basic_auth(request)
+    if not auth_ctx:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    role_err = _require_university_admin_role(auth_ctx)
+    if role_err:
+        return role_err
+    scope_tenant = _resolve_scope_tenant(auth_ctx, tenant_id)
+    spec = _build_lightweight_llm_spec(prompt_text)
+    clean_code = code.strip().lower()
+    clean_title = title.strip()
+    if not clean_code or not clean_title:
+        return JSONResponse({"error": "invalid_input"}, status_code=400)
+
+    if USE_POSTGRES:
+        await asyncio.to_thread(
+            _pg_execute_sync,
+            """INSERT INTO assignments (tenant_id, code, title, prompt_text, llm_spec_json, is_active, created_by_email)
+               VALUES (%s, %s, %s, %s, %s::jsonb, TRUE, %s)
+               ON CONFLICT (tenant_id, code) DO UPDATE
+               SET title = EXCLUDED.title,
+                   prompt_text = EXCLUDED.prompt_text,
+                   llm_spec_json = EXCLUDED.llm_spec_json,
+                   is_active = TRUE,
+                   created_by_email = EXCLUDED.created_by_email""",
+            (scope_tenant, clean_code, clean_title, prompt_text, json.dumps(spec, ensure_ascii=False), auth_ctx["email"]),
+        )
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """INSERT INTO assignments (tenant_id, code, title, prompt_text, llm_spec_json, is_active, created_by_email)
+                   VALUES (?, ?, ?, ?, ?, 1, ?)
+                   ON CONFLICT(tenant_id, code) DO UPDATE SET
+                     title = excluded.title,
+                     prompt_text = excluded.prompt_text,
+                     llm_spec_json = excluded.llm_spec_json,
+                     is_active = 1,
+                     created_by_email = excluded.created_by_email""",
+                (scope_tenant, clean_code, clean_title, prompt_text, json.dumps(spec, ensure_ascii=False), auth_ctx["email"]),
+            )
+            await db.commit()
+
+    await _log_api_access(auth_ctx["email"], f"/api/admin/assignments:{clean_code}", scope_tenant)
+    return JSONResponse({"ok": True, "tenant_id": scope_tenant, "code": clean_code, "title": clean_title, "llm_spec": spec})
+
+
+@app.get("/api/assignments")
+async def api_list_assignments(
+    request: Request,
+    tenant_id: Optional[str] = Query(default=None),
+):
+    """List active assignments for tenant (used by student/teacher apps)."""
+    auth_ctx = await _verify_basic_auth(request)
+    if not auth_ctx:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    scope_tenant = _resolve_scope_tenant(auth_ctx, tenant_id)
+    await _log_api_access(auth_ctx["email"], "/api/assignments", scope_tenant)
+
+    if USE_POSTGRES:
+        rows = await asyncio.to_thread(
+            _pg_fetchall_sync,
+            """SELECT code, title, prompt_text, llm_spec_json, is_active, created_by_email, created_at
+               FROM assignments
+               WHERE tenant_id = %s AND is_active = TRUE
+               ORDER BY created_at DESC""",
+            (scope_tenant,),
+        )
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT code, title, prompt_text, llm_spec_json, is_active, created_by_email, created_at
+                   FROM assignments
+                   WHERE tenant_id = ? AND is_active = 1
+                   ORDER BY created_at DESC""",
+                (scope_tenant,),
+            ) as cur:
+                rows = [dict(r) async for r in cur]
+    return JSONResponse({"tenant_id": scope_tenant, "items": rows})
+
+
+@app.post("/api/admin/assignments/{code}/deactivate")
+async def api_admin_deactivate_assignment(
+    request: Request,
+    code: str,
+    tenant_id: Optional[str] = Form(default=None),
+):
+    auth_ctx = await _verify_basic_auth(request)
+    if not auth_ctx:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    role_err = _require_university_admin_role(auth_ctx)
+    if role_err:
+        return role_err
+    scope_tenant = _resolve_scope_tenant(auth_ctx, tenant_id)
+    if USE_POSTGRES:
+        await asyncio.to_thread(
+            _pg_execute_sync,
+            "UPDATE assignments SET is_active = FALSE WHERE tenant_id = %s AND code = %s",
+            (scope_tenant, code.strip().lower()),
+        )
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE assignments SET is_active = 0 WHERE tenant_id = ? AND code = ?",
+                (scope_tenant, code.strip().lower()),
+            )
+            await db.commit()
+    await _log_api_access(auth_ctx["email"], f"/api/admin/assignments/{code}/deactivate", scope_tenant)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/admin/assignments/{code}/delete")
+async def api_admin_delete_assignment(
+    request: Request,
+    code: str,
+    tenant_id: Optional[str] = Form(default=None),
+):
+    auth_ctx = await _verify_basic_auth(request)
+    if not auth_ctx:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    role_err = _require_university_admin_role(auth_ctx)
+    if role_err:
+        return role_err
+    scope_tenant = _resolve_scope_tenant(auth_ctx, tenant_id)
+    if USE_POSTGRES:
+        await asyncio.to_thread(
+            _pg_execute_sync,
+            "DELETE FROM assignments WHERE tenant_id = %s AND code = %s",
+            (scope_tenant, code.strip().lower()),
+        )
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM assignments WHERE tenant_id = ? AND code = ?",
+                (scope_tenant, code.strip().lower()),
+            )
+            await db.commit()
+    await _log_api_access(auth_ctx["email"], f"/api/admin/assignments/{code}/delete", scope_tenant)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/admin/assignments/{code}")
+async def api_admin_update_assignment(
+    request: Request,
+    code: str,
+    title: str = Form(...),
+    prompt_text: str = Form(...),
+    tenant_id: Optional[str] = Form(default=None),
+):
+    auth_ctx = await _verify_basic_auth(request)
+    if not auth_ctx:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    role_err = _require_university_admin_role(auth_ctx)
+    if role_err:
+        return role_err
+    scope_tenant = _resolve_scope_tenant(auth_ctx, tenant_id)
+    spec = _build_lightweight_llm_spec(prompt_text)
+    clean_code = code.strip().lower()
+    if USE_POSTGRES:
+        await asyncio.to_thread(
+            _pg_execute_sync,
+            """UPDATE assignments
+               SET title = %s, prompt_text = %s, llm_spec_json = %s::jsonb
+               WHERE tenant_id = %s AND code = %s""",
+            (title.strip(), prompt_text, json.dumps(spec, ensure_ascii=False), scope_tenant, clean_code),
+        )
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """UPDATE assignments
+                   SET title = ?, prompt_text = ?, llm_spec_json = ?
+                   WHERE tenant_id = ? AND code = ?""",
+                (title.strip(), prompt_text, json.dumps(spec, ensure_ascii=False), scope_tenant, clean_code),
+            )
+            await db.commit()
+    await _log_api_access(auth_ctx["email"], f"/api/admin/assignments/{code}", scope_tenant)
+    return JSONResponse({"ok": True, "code": clean_code, "llm_spec": spec})
+
+
+@app.post("/api/chat/thread")
+async def api_chat_create_thread(
+    request: Request,
+    student_github_alias: str = Form(...),
+    tenant_id: Optional[str] = Form(default=None),
+):
+    """Create or return an existing 1:1 teacher-student thread."""
+    auth_ctx = await _verify_basic_auth(request)
+    if not auth_ctx:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    role_err = _require_teacher_role(auth_ctx)
+    if role_err:
+        return role_err
+    scope_tenant = _resolve_scope_tenant(auth_ctx, tenant_id)
+    teacher = await _get_user_identity_by_email(auth_ctx["email"], scope_tenant)
+    student = await _get_user_identity_by_github(student_github_alias.strip(), scope_tenant)
+    if not teacher or not student:
+        return JSONResponse({"error": "user_not_found"}, status_code=404)
+
+    if USE_POSTGRES:
+        await asyncio.to_thread(
+            _pg_execute_sync,
+            """INSERT INTO conversation_threads (tenant_id, student_tg_id, teacher_tg_id)
+               VALUES (%s, %s, %s)
+               ON CONFLICT DO NOTHING""",
+            (scope_tenant, int(student["tg_id"]), int(teacher["tg_id"])),
+        )
+        row = await asyncio.to_thread(
+            _pg_fetchone_sync,
+            """SELECT id, student_tg_id, teacher_tg_id, created_at, updated_at
+               FROM conversation_threads
+               WHERE tenant_id = %s AND student_tg_id = %s AND teacher_tg_id = %s
+               ORDER BY id DESC LIMIT 1""",
+            (scope_tenant, int(student["tg_id"]), int(teacher["tg_id"])),
+        )
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """INSERT INTO conversation_threads (tenant_id, student_tg_id, teacher_tg_id)
+                   VALUES (?, ?, ?)""",
+                (scope_tenant, int(student["tg_id"]), int(teacher["tg_id"])),
+            )
+            await db.commit()
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT id, student_tg_id, teacher_tg_id, created_at, updated_at
+                   FROM conversation_threads
+                   WHERE tenant_id = ? AND student_tg_id = ? AND teacher_tg_id = ?
+                   ORDER BY id DESC LIMIT 1""",
+                (scope_tenant, int(student["tg_id"]), int(teacher["tg_id"])),
+            ) as cur:
+                row = await cur.fetchone()
+                row = dict(row) if row else None
+    await _log_api_access(auth_ctx["email"], f"/api/chat/thread:{student_github_alias}", scope_tenant)
+    return JSONResponse({"tenant_id": scope_tenant, "thread": row})
+
+
+@app.post("/api/chat/messages")
+async def api_chat_send_message(
+    request: Request,
+    thread_id: int = Form(...),
+    body: str = Form(...),
+    tenant_id: Optional[str] = Form(default=None),
+):
+    """Send a message in a teacher-student thread."""
+    auth_ctx = await _verify_basic_auth(request)
+    if not auth_ctx:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    scope_tenant = _resolve_scope_tenant(auth_ctx, tenant_id)
+    me = await _get_user_identity_by_email(auth_ctx["email"], scope_tenant)
+    if not me:
+        return JSONResponse({"error": "user_not_found"}, status_code=404)
+
+    if USE_POSTGRES:
+        thread = await asyncio.to_thread(
+            _pg_fetchone_sync,
+            "SELECT id, student_tg_id, teacher_tg_id FROM conversation_threads WHERE tenant_id = %s AND id = %s",
+            (scope_tenant, thread_id),
+        )
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT id, student_tg_id, teacher_tg_id FROM conversation_threads WHERE tenant_id = ? AND id = ?",
+                (scope_tenant, thread_id),
+            ) as cur:
+                row = await cur.fetchone()
+                thread = dict(row) if row else None
+    if not thread:
+        return JSONResponse({"error": "thread_not_found"}, status_code=404)
+
+    me_id = int(me["tg_id"])
+    if me_id not in {int(thread["student_tg_id"]), int(thread["teacher_tg_id"])}:
+        return _forbidden()
+
+    sender_role = "teacher" if _is_teacher_role(str(auth_ctx["role"])) else "student"
+    clean_body = body.strip()
+    if not clean_body:
+        return JSONResponse({"error": "empty_message"}, status_code=400)
+
+    if USE_POSTGRES:
+        await asyncio.to_thread(
+            _pg_execute_sync,
+            """INSERT INTO conversation_messages (tenant_id, thread_id, sender_role, sender_email, body)
+               VALUES (%s, %s, %s, %s, %s)""",
+            (scope_tenant, thread_id, sender_role, auth_ctx["email"], clean_body),
+        )
+        await asyncio.to_thread(
+            _pg_execute_sync,
+            "UPDATE conversation_threads SET updated_at = NOW() WHERE tenant_id = %s AND id = %s",
+            (scope_tenant, thread_id),
+        )
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """INSERT INTO conversation_messages (tenant_id, thread_id, sender_role, sender_email, body)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (scope_tenant, thread_id, sender_role, auth_ctx["email"], clean_body),
+            )
+            await db.execute(
+                "UPDATE conversation_threads SET updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND id = ?",
+                (scope_tenant, thread_id),
+            )
+            await db.commit()
+    await _log_api_access(auth_ctx["email"], f"/api/chat/messages:{thread_id}", scope_tenant)
+    return JSONResponse({"ok": True, "thread_id": thread_id})
+
+
+@app.get("/api/chat/threads")
+async def api_chat_list_threads(
+    request: Request,
+    tenant_id: Optional[str] = Query(default=None),
+):
+    """List chat threads available to current user."""
+    auth_ctx = await _verify_basic_auth(request)
+    if not auth_ctx:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    scope_tenant = _resolve_scope_tenant(auth_ctx, tenant_id)
+    me = await _get_user_identity_by_email(auth_ctx["email"], scope_tenant)
+    if not me:
+        return JSONResponse({"error": "user_not_found"}, status_code=404)
+
+    if USE_POSTGRES:
+        if _is_teacher_role(str(auth_ctx["role"])):
+            rows = await asyncio.to_thread(
+                _pg_fetchall_sync,
+                "SELECT id, student_tg_id, teacher_tg_id, created_at, updated_at FROM conversation_threads WHERE tenant_id = %s AND teacher_tg_id = %s ORDER BY updated_at DESC",
+                (scope_tenant, int(me["tg_id"])),
+            )
+        else:
+            rows = await asyncio.to_thread(
+                _pg_fetchall_sync,
+                "SELECT id, student_tg_id, teacher_tg_id, created_at, updated_at FROM conversation_threads WHERE tenant_id = %s AND student_tg_id = %s ORDER BY updated_at DESC",
+                (scope_tenant, int(me["tg_id"])),
+            )
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            if _is_teacher_role(str(auth_ctx["role"])):
+                query = "SELECT id, student_tg_id, teacher_tg_id, created_at, updated_at FROM conversation_threads WHERE tenant_id = ? AND teacher_tg_id = ? ORDER BY updated_at DESC"
+            else:
+                query = "SELECT id, student_tg_id, teacher_tg_id, created_at, updated_at FROM conversation_threads WHERE tenant_id = ? AND student_tg_id = ? ORDER BY updated_at DESC"
+            async with db.execute(query, (scope_tenant, int(me["tg_id"]))) as cur:
+                rows = [dict(r) async for r in cur]
+    await _log_api_access(auth_ctx["email"], "/api/chat/threads", scope_tenant)
+    return JSONResponse({"tenant_id": scope_tenant, "items": rows})
+
+
+@app.get("/api/chat/messages")
+async def api_chat_get_messages(
+    request: Request,
+    thread_id: int = Query(...),
+    tenant_id: Optional[str] = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    """Get messages from one thread with access control."""
+    auth_ctx = await _verify_basic_auth(request)
+    if not auth_ctx:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    scope_tenant = _resolve_scope_tenant(auth_ctx, tenant_id)
+    me = await _get_user_identity_by_email(auth_ctx["email"], scope_tenant)
+    if not me:
+        return JSONResponse({"error": "user_not_found"}, status_code=404)
+
+    if USE_POSTGRES:
+        thread = await asyncio.to_thread(
+            _pg_fetchone_sync,
+            "SELECT id, student_tg_id, teacher_tg_id FROM conversation_threads WHERE tenant_id = %s AND id = %s",
+            (scope_tenant, thread_id),
+        )
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT id, student_tg_id, teacher_tg_id FROM conversation_threads WHERE tenant_id = ? AND id = ?",
+                (scope_tenant, thread_id),
+            ) as cur:
+                row = await cur.fetchone()
+                thread = dict(row) if row else None
+    if not thread:
+        return JSONResponse({"error": "thread_not_found"}, status_code=404)
+    if int(me["tg_id"]) not in {int(thread["student_tg_id"]), int(thread["teacher_tg_id"])}:
+        return _forbidden()
+
+    if USE_POSTGRES:
+        rows = await asyncio.to_thread(
+            _pg_fetchall_sync,
+            "SELECT id, sender_role, sender_email, body, created_at FROM conversation_messages WHERE tenant_id = %s AND thread_id = %s ORDER BY id DESC LIMIT %s",
+            (scope_tenant, thread_id, limit),
+        )
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT id, sender_role, sender_email, body, created_at FROM conversation_messages WHERE tenant_id = ? AND thread_id = ? ORDER BY id DESC LIMIT ?",
+                (scope_tenant, thread_id, limit),
+            ) as cur:
+                rows = [dict(r) async for r in cur]
+
+    await _log_api_access(auth_ctx["email"], f"/api/chat/messages?thread_id={thread_id}", scope_tenant)
+    return JSONResponse({"tenant_id": scope_tenant, "thread_id": thread_id, "messages": rows})
+
+
+@app.get("/api/teacher/submissions")
+async def api_teacher_submissions(
+    request: Request,
+    tenant_id: Optional[str] = Query(default=None),
+    assignment_code: Optional[str] = Query(default=None),
+    student_tg_id: Optional[int] = Query(default=None),
+    status: Optional[str] = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    """Teacher view of assignment submission queue/statuses."""
+    auth_ctx = await _verify_basic_auth(request)
+    if not auth_ctx:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    role_err = _require_teacher_role(auth_ctx)
+    if role_err:
+        return role_err
+    scope_tenant = _resolve_scope_tenant(auth_ctx, tenant_id)
+
+    clauses = ["tenant_id = %s"] if USE_POSTGRES else ["tenant_id = ?"]
+    params: list[Any] = [scope_tenant]
+    if assignment_code:
+        clauses.append("assignment_code = %s" if USE_POSTGRES else "assignment_code = ?")
+        params.append(assignment_code.strip().lower())
+    if student_tg_id is not None:
+        clauses.append("tg_id = %s" if USE_POSTGRES else "tg_id = ?")
+        params.append(int(student_tg_id))
+    if status:
+        clauses.append("status = %s" if USE_POSTGRES else "status = ?")
+        params.append(status.strip().lower())
+    where_sql = " AND ".join(clauses)
+
+    if USE_POSTGRES:
+        rows = await asyncio.to_thread(
+            _pg_fetchall_sync,
+            f"""SELECT id, tenant_id, tg_id, assignment_code, repo_url, status, source,
+                       created_at, updated_at, processed_at, result_text, error_message
+                FROM assignment_submissions
+                WHERE {where_sql}
+                ORDER BY id DESC
+                LIMIT %s""",
+            tuple(params + [limit]),
+        )
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                f"""SELECT id, tenant_id, tg_id, assignment_code, repo_url, status, source,
+                           created_at, updated_at, processed_at, result_text, error_message
+                    FROM assignment_submissions
+                    WHERE {where_sql}
+                    ORDER BY id DESC
+                    LIMIT ?""",
+                tuple(params + [limit]),
+            ) as cur:
+                rows = [dict(r) async for r in cur]
+
+    await _log_api_access(auth_ctx["email"], "/api/teacher/submissions", scope_tenant)
+    return JSONResponse({"tenant_id": scope_tenant, "items": rows})
 
 
 # ---------------------------------------------------------------------------
