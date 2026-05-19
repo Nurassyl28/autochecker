@@ -13,6 +13,13 @@ The current base already exists:
 
 This is not a rewrite. It is an upgrade of the existing autochecker architecture into a more tutor-like and teacher-assistant-oriented product.
 
+Current implemented baseline:
+- structured feedback fields are active in check outputs/reports
+- escalation policy is evaluated by failed-attempt thresholds
+- deep diagnostics payload is attached for escalated checks
+- teacher summary APIs are available in dashboard backend
+- SQLite schema is tenant/role-ready and PostgreSQL schema bootstrap is included
+
 ## Product Direction
 
 ### Student-facing
@@ -80,7 +87,8 @@ Primary ownership for the current user:
 - Typer CLI
 - FastAPI
 - aiogram
-- aiosqlite / SQLite
+- aiosqlite / SQLite (current runtime)
+- PostgreSQL (migration target; schema prepared)
 - Jinja2 templates
 - Pydantic
 - YAML lab specs

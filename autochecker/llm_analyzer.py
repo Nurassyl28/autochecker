@@ -5,6 +5,8 @@ import re
 import time
 import requests
 import threading
+from pathlib import Path
+from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
 from .repo_reader import RepoReader
 from .github_client import GitHubClient
@@ -17,6 +19,95 @@ _api_semaphore = threading.Semaphore(1)
 _last_request_time = 0
 _request_lock = threading.Lock()
 _MIN_REQUEST_INTERVAL = 2.0  # Minimum interval between requests (seconds) - increased to 2s to avoid rate limit
+
+# Cost-control guardrails
+_USAGE_LOCK = threading.Lock()
+_USAGE_FILE = Path(__file__).resolve().parent.parent / ".llm_usage.json"
+_DEFAULT_TENANT = os.getenv("DEFAULT_TENANT_ID", "default")
+_BUDGET_ENABLED = os.getenv("LLM_BUDGET_ENABLED", "1").strip() not in ("0", "false", "False")
+_MAX_PROMPT_CHARS = int(os.getenv("LLM_MAX_PROMPT_CHARS", "30000"))
+_MAX_EST_PROMPT_TOKENS = int(os.getenv("LLM_MAX_EST_PROMPT_TOKENS", "8000"))
+_DAILY_MAX_REQUESTS = int(os.getenv("LLM_DAILY_MAX_REQUESTS", "400"))
+_DAILY_MAX_EST_TOKENS = int(os.getenv("LLM_DAILY_MAX_EST_TOKENS", "1200000"))
+
+
+def _today_utc() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _estimate_tokens(text: str) -> int:
+    # Rough OpenAI-compatible estimate for guardrails.
+    return max(1, len(text) // 4)
+
+
+def _load_usage_state() -> Dict[str, Any]:
+    if not _USAGE_FILE.exists():
+        return {"tenants": {}}
+    try:
+        return json.loads(_USAGE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {"tenants": {}}
+
+
+def _save_usage_state(state: Dict[str, Any]) -> None:
+    _USAGE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _apply_budget_guardrails(tenant_id: str, prompt: str) -> int:
+    """Validate prompt limits and daily tenant budget. Returns estimated tokens."""
+    if len(prompt) > _MAX_PROMPT_CHARS:
+        raise RuntimeError(
+            f"LLM prompt exceeds limit: {len(prompt)} chars > {_MAX_PROMPT_CHARS} chars."
+        )
+    est_tokens = _estimate_tokens(prompt)
+    if est_tokens > _MAX_EST_PROMPT_TOKENS:
+        raise RuntimeError(
+            f"LLM prompt token estimate exceeds limit: {est_tokens} > {_MAX_EST_PROMPT_TOKENS}."
+        )
+    if not _BUDGET_ENABLED:
+        return est_tokens
+
+    day = _today_utc()
+    with _USAGE_LOCK:
+        state = _load_usage_state()
+        tenants = state.setdefault("tenants", {})
+        tenant = tenants.setdefault(tenant_id, {})
+        day_state = tenant.setdefault(day, {"requests": 0, "est_tokens": 0, "actual_tokens": 0})
+
+        next_requests = int(day_state.get("requests", 0)) + 1
+        next_est_tokens = int(day_state.get("est_tokens", 0)) + est_tokens
+        if next_requests > _DAILY_MAX_REQUESTS:
+            raise RuntimeError(
+                f"LLM daily request quota exceeded for tenant '{tenant_id}' ({next_requests}>{_DAILY_MAX_REQUESTS})."
+            )
+        if next_est_tokens > _DAILY_MAX_EST_TOKENS:
+            raise RuntimeError(
+                f"LLM daily token budget exceeded for tenant '{tenant_id}' ({next_est_tokens}>{_DAILY_MAX_EST_TOKENS})."
+            )
+
+        day_state["requests"] = next_requests
+        day_state["est_tokens"] = next_est_tokens
+        _save_usage_state(state)
+    return est_tokens
+
+
+def _record_actual_usage(tenant_id: str, usage: Dict[str, Any], fallback_est_tokens: int) -> None:
+    if not _BUDGET_ENABLED:
+        return
+    total_tokens = usage.get("total_tokens")
+    if not isinstance(total_tokens, int) or total_tokens <= 0:
+        total_tokens = fallback_est_tokens
+
+    day = _today_utc()
+    with _USAGE_LOCK:
+        state = _load_usage_state()
+        tenants = state.setdefault("tenants", {})
+        tenant = tenants.setdefault(tenant_id, {})
+        day_state = tenant.setdefault(day, {"requests": 0, "est_tokens": 0, "actual_tokens": 0})
+        day_state["actual_tokens"] = int(day_state.get("actual_tokens", 0)) + int(total_tokens)
+        _save_usage_state(state)
+
+
 def _call_llm_api(openrouter_api_key: str, prompt: str, model: str = None, api_url: str = None) -> Dict:
     """
     Calls an LLM via an OpenAI-compatible API with the given prompt.
@@ -35,6 +126,8 @@ def _call_llm_api(openrouter_api_key: str, prompt: str, model: str = None, api_u
         api_url = os.getenv("LLM_API_URL", "https://openrouter.ai/api/v1/chat/completions")
 
     model = model or DEFAULT_MODEL
+    tenant_id = os.getenv("LLM_TENANT_ID", _DEFAULT_TENANT).strip() or _DEFAULT_TENANT
+    est_tokens = _apply_budget_guardrails(tenant_id, prompt)
     models_to_try = [model]
     
     last_error = None
@@ -118,6 +211,10 @@ def _call_llm_api(openrouter_api_key: str, prompt: str, model: str = None, api_u
                     raise ValueError("Could not get API response")
                 
                 result = response.json()
+                usage = result.get("usage", {}) if isinstance(result, dict) else {}
+                if not isinstance(usage, dict):
+                    usage = {}
+                _record_actual_usage(tenant_id, usage, est_tokens)
                 
                 # Extract text from OpenRouter response
                 if 'choices' in result and len(result['choices']) > 0:

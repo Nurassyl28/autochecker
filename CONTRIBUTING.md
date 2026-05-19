@@ -129,3 +129,17 @@ uv run python main.py check -s <student> -l lab-01 -p github
 # Batch check all students
 uv run python main.py batch -l lab-01 -p github
 ```
+
+## Database Migration Context
+
+- Default runtime in this repo remains SQLite (`DB_PATH`).
+- Multi-tenant PostgreSQL migration is prepared:
+  - schema: `db/postgres_schema.sql`
+  - init script: `scripts/init_postgres.py`
+- Initialize PostgreSQL schema with:
+
+```bash
+export DATABASE_URL='postgresql://user:pass@localhost:5432/autochecker'
+export DEFAULT_TENANT_ID='default'
+uv run python scripts/init_postgres.py
+```

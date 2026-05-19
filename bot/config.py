@@ -18,6 +18,8 @@ if not BOT_TOKEN:
 
 # Database configuration
 DB_PATH = os.getenv("DB_PATH", "bot.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+DEFAULT_TENANT_ID = os.getenv("DEFAULT_TENANT_ID", "default").strip() or "default"
 
 # Project paths — resolved from monorepo root
 BASE_DIR = Path(__file__).resolve().parent.parent

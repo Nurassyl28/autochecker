@@ -56,21 +56,21 @@ Make it easier to define labs, rubrics, hints, escalation triggers, tutoring con
 ### Phase 1 — Student feedback structure
 
 - Extend spec model with tutoring metadata (`TutoringSpec`) — **done in `autochecker/spec.py`**
-- Wire engine to produce `StructuredFeedback` — **done as contract; not yet produced by engine**
-- Render structured feedback in bot + HTML report
+- Wire engine to produce `StructuredFeedback` — **done**
+- Render structured feedback in bot + HTML report — **done**
 
 ### Phase 2 — Escalation
 
-- Implement `EscalationSpec` execution path
-- Build diagnostic-agent layer that inspects repo + VM
-- Persist escalation state; expose it to bot + dashboard
+- Implement `EscalationSpec` execution path — **done (attempt-threshold based)**
+- Build diagnostic-agent layer that inspects repo + VM — **partial (diagnostic payload active, full external agent pending)**
+- Persist escalation state; expose it to bot + dashboard — **done**
 
 ### Phase 3 — Teacher assistant
 
-- Summary generation per student, per task, per cohort
-- Failure clustering
-- Dashboard cohort analytics view
-- Intervention recommendations
+- Summary generation per student, per task, per cohort — **done via API**
+- Failure clustering — **basic implementation in API**
+- Dashboard cohort analytics view — **pending UI integration**
+- Intervention recommendations — **basic API suggestions implemented**
 
 ### Phase 4 — Beginner track
 
@@ -98,11 +98,10 @@ Make it easier to define labs, rubrics, hints, escalation triggers, tutoring con
 
 ## What's not yet built
 
-- ❌ Engine does not produce `StructuredFeedback` today; checks return the old `{id, status, details, hint}` dict
-- ❌ No escalation policy evaluation anywhere in the code path
-- ❌ No diagnostic-agent layer (only per-check LLM analysis via `llm_judge`)
-- ❌ No cohort analytics or failure clustering in the dashboard
-- ❌ No beginner-track prompts
+- ❌ Full standalone diagnostic-agent execution pipeline (repo+VM deep run as separate orchestrated stage)
+- ❌ Full dashboard UI for teacher summaries/cohort analytics
+- ❌ Beginner-track prompts and guided glossary flow
+- ❌ Full PostgreSQL runtime cutover (schema is prepared; app still runs on SQLite by default)
 
 ## Backend + AI deliverables
 

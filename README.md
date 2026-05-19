@@ -1,6 +1,6 @@
 # Autochecker
 
-Automated student lab checker with Telegram bot and web dashboard.
+AI tutor + teacher-assistant platform for repository-based assignments.
 
 ## Components
 
@@ -8,6 +8,7 @@ Automated student lab checker with Telegram bot and web dashboard.
 - **bot/** — Telegram bot (aiogram 3.x) for student self-service
 - **dashboard/** — FastAPI web dashboard for instructors
 - **specs/** — YAML lab specifications
+- **db/** — PostgreSQL schema bootstrap for multi-tenant migration
 
 ## Quick Start
 
@@ -63,7 +64,7 @@ autochecker/                    # repo root
 ├── bot/                        # Telegram bot
 │   ├── allowed_emails.csv      # email whitelist with groups (from Moodle CSV)
 │   ├── config.py               # bot configuration + whitelist loading
-│   ├── database.py             # SQLite with migrations (v4)
+│   ├── database.py             # SQLite with migrations (v9, tenant/role-ready)
 │   ├── runner.py               # autochecker integration (direct import)
 │   ├── keyboards.py            # inline keyboards
 │   ├── middlewares.py          # auth middleware + whitelist enforcement
@@ -74,6 +75,7 @@ autochecker/                    # repo root
 │   ├── app.py                  # routes, auth, relay endpoints
 │   └── templates/              # Jinja2 HTML templates
 ├── specs/                      # lab YAML specs
+├── db/                         # PostgreSQL schema (multi-tenant + RBAC baseline)
 ├── docs/                       # internal documentation
 │   ├── infrastructure.md       # network topology, SSH routing, relay
 │   └── gotchas.md              # recurring bugs & surprising fixes
@@ -85,7 +87,7 @@ autochecker/                    # repo root
 │   └── update.sh               # pull, verify, rebuild, restart
 ├── main.py                     # CLI entry point
 ├── main_bot.py                 # bot entry point
-├── verify.py                   # pre-deploy verification (27 checks)
+├── verify.py                   # pre-deploy verification checks
 ├── requirements.txt
 ├── .env.example
 ├── students.csv
@@ -103,8 +105,16 @@ All config is via environment variables (`.env` file):
 | `GITLAB_TOKEN` | GitLab API token | — |
 | `OPENROUTER_API_KEY` | OpenRouter API key for LLM checks | — |
 | `LLM_MODEL` | LLM model identifier | `google/gemini-2.5-flash-lite` |
+| `LLM_BUDGET_ENABLED` | Enable tenant budget guardrails for LLM calls | `1` |
+| `LLM_TENANT_ID` | Tenant id used for LLM budget accounting | `default` |
+| `LLM_MAX_PROMPT_CHARS` | Hard limit for prompt size in chars | `30000` |
+| `LLM_MAX_EST_PROMPT_TOKENS` | Hard limit for estimated prompt tokens | `8000` |
+| `LLM_DAILY_MAX_REQUESTS` | Daily request quota per tenant | `400` |
+| `LLM_DAILY_MAX_EST_TOKENS` | Daily estimated-token budget per tenant | `1200000` |
 | `BOT_TOKEN` | Telegram bot token | — |
 | `DB_PATH` | SQLite database path | `bot.db` |
+| `DATABASE_URL` | PostgreSQL DSN (migration target) | — |
+| `DEFAULT_TENANT_ID` | Default university/tenant id | `default` |
 | `ACTIVE_LABS` | Comma-separated active lab IDs | `lab-01` |
 | `MAX_ATTEMPTS_PER_TASK` | Max check attempts per student per task | `3` |
 | `DASHBOARD_PASSWORD` | Dashboard auth password (empty = no auth) | — |
@@ -256,6 +266,42 @@ The bot imports `check_student()` from the `autochecker` package directly (no su
 bot/runner.py  →  autochecker.check_student()  →  engine + LLM  →  StudentCheckResult
     ↓
 bot/handlers/check.py reads result files + saves to SQLite
+```
+
+## What Is Implemented Now
+
+- Structured feedback fields are generated and rendered (`short_reason`, `detailed_reason`, `likely_cause`, `next_steps`, `escalation_state`).
+- Escalation policy is evaluated using attempt history and spec thresholds.
+- Deep diagnostics are attached for escalated checks and persisted in result details.
+- Teacher-assistant APIs are available:
+  - `/api/teacher/summary/student/{github_alias}`
+  - `/api/teacher/summary/task?lab_id=...&task_id=...`
+  - `/api/teacher/summary/cohort?lab_id=...`
+- Database is tenant/role-ready in SQLite and a PostgreSQL multi-tenant schema is included in `db/postgres_schema.sql`.
+
+## PostgreSQL Initialization (Migration Target)
+
+```bash
+export DATABASE_URL='postgresql://user:pass@localhost:5432/autochecker'
+export DEFAULT_TENANT_ID='default'
+uv run python scripts/init_postgres.py
+```
+
+## SQLite -> PostgreSQL Data Migration
+
+```bash
+export DB_PATH='bot.db'
+export DATABASE_URL='postgresql://user:pass@localhost:5432/autochecker'
+export DEFAULT_TENANT_ID='default'
+
+uv run python scripts/migrate_sqlite_to_postgres.py
+```
+
+### Post-migration verification
+
+```bash
+uv run python scripts/verify_pg_migration.py
+bash scripts/e2e_pg_cutover.sh
 ```
 
 ## Sandbox (clone_and_run)
