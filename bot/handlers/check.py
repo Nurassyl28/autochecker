@@ -173,7 +173,152 @@ def _infer_likely_cause(status: str, details: str, likely_cause: str) -> str:
     return "Requirement is not satisfied by current repository/runtime state."
 
 
-def _run_deep_diagnostics(lab_id: str, task_id: str, checks: list[dict]) -> int:
+def _extract_evidence_lines(details: str, max_lines: int = 5) -> list[str]:
+    """Extract concise evidence lines from details for diagnostic payload."""
+    if not details:
+        return []
+    lines = [line.strip() for line in details.splitlines() if line.strip()]
+    if not lines:
+        return []
+    return lines[:max_lines]
+
+
+def _classify_failure_taxonomy(status: str, details: str, likely_cause: str) -> str:
+    """Map a failure into a stable taxonomy bucket for analytics."""
+    if str(status).upper() == "PASS":
+        return "pass"
+    text = f"{status} {details} {likely_cause}".lower()
+    if "not found" in text or "does not exist" in text or "missing" in text:
+        return "missing_resource"
+    if "timeout" in text:
+        return "timeout"
+    if "permission" in text or "denied" in text or "forbidden" in text or "unauthorized" in text:
+        return "permission_access"
+    if "connection" in text or "refused" in text or "unreachable" in text:
+        return "connectivity"
+    if "traceback" in text or "exception" in text or "error" in text:
+        return "runtime_error"
+    return "requirement_mismatch"
+
+
+def _read_report_excerpt(path, max_chars: int = 1200) -> str:
+    """Read a short excerpt from a report file for diagnostics."""
+    if not path:
+        return ""
+    try:
+        if not path.exists():
+            return ""
+        text = path.read_text(encoding="utf-8")
+        text = text.strip()
+        return text[:max_chars]
+    except Exception:
+        return ""
+
+
+def collect_repo_evidence(check: dict) -> dict:
+    """Collect repo/check-level evidence from the structured check payload."""
+    details = str(check.get("details", "")).strip()
+    return {
+        "status": "ok",
+        "check_id": str(check.get("id", "")).strip(),
+        "short_reason": str(check.get("short_reason", "")).strip(),
+        "likely_cause": str(check.get("likely_cause", "")).strip(),
+        "evidence_text": details[:1500],
+        "evidence_lines": _extract_evidence_lines(details),
+    }
+
+
+def collect_log_evidence(student_report_excerpt: str, summary_excerpt: str) -> dict:
+    """Collect report/log evidence excerpts produced by the checker."""
+    status = "ok" if student_report_excerpt or summary_excerpt else "missing"
+    return {
+        "status": status,
+        "student_report_excerpt": student_report_excerpt,
+        "summary_excerpt": summary_excerpt,
+    }
+
+
+def collect_vm_evidence(server_ip: str, vm_username: str | None, timeout: int = 10) -> dict:
+    """Collect minimal VM snapshot via relay SSH with retries and explicit status."""
+    relay_token = os.environ.get("RELAY_TOKEN", "")
+    if not relay_token:
+        return {"status": "unavailable", "reason": "relay_token_missing"}
+    if not server_ip:
+        return {"status": "skipped", "reason": "server_ip_missing"}
+
+    relay_url = os.environ.get("RELAY_URL", "http://dashboard:8000/relay/ssh")
+    username = (vm_username or "autochecker").strip() or "autochecker"
+    command = (
+        "set -o pipefail; "
+        "echo __DIAG_BEGIN__; "
+        "whoami; "
+        "uname -a; "
+        "pwd; "
+        "ls -la | head -n 20; "
+        "echo __DIAG_END__"
+    )
+
+    last_error = ""
+    for attempt in range(1, 3):
+        try:
+            resp = requests.post(
+                relay_url,
+                json={
+                    "host": server_ip,
+                    "port": 22,
+                    "username": username,
+                    "command": command,
+                    "timeout": timeout,
+                },
+                headers={"Authorization": f"Bearer {relay_token}"},
+                timeout=timeout + 8,
+            )
+            if resp.status_code != 200:
+                last_error = f"http_{resp.status_code}"
+                continue
+            data = resp.json()
+            if data.get("error"):
+                last_error = str(data.get("error"))[:120]
+                continue
+            stdout = str(data.get("stdout", "")).strip()
+            return {
+                "status": "ok",
+                "attempts": attempt,
+                "host": server_ip,
+                "username": username,
+                "stdout_excerpt": stdout[:1000],
+            }
+        except requests.Timeout:
+            last_error = "timeout"
+        except Exception as exc:
+            last_error = f"exception:{str(exc)[:80]}"
+
+    return {"status": "failed", "attempts": 2, "host": server_ip, "username": username, "reason": last_error}
+
+
+def _derive_diagnostic_status(source_status: dict[str, str]) -> str:
+    """Derive a compact overall diagnostic status from source statuses."""
+    values = list(source_status.values())
+    if values and all(v == "ok" for v in values):
+        return "complete"
+    if any(v == "ok" for v in values):
+        return "partial"
+    if any(v in {"failed", "unavailable"} for v in values):
+        return "degraded"
+    return "missing"
+
+
+def _run_deep_diagnostics(
+    lab_id: str,
+    task_id: str,
+    checks: list[dict],
+    used_attempts_after_run: int,
+    *,
+    server_ip: str | None = None,
+    vm_username: str | None = None,
+    student_report_excerpt: str = "",
+    summary_excerpt: str = "",
+) -> int:
     """Attach structured diagnostics for checks in `triggered` escalation state.
 
     Returns number of checks that reached `completed`.
@@ -202,15 +347,44 @@ def _run_deep_diagnostics(lab_id: str, task_id: str, checks: list[dict]) -> int:
                 "Apply one focused fix, then run check again.",
             ]
 
+        check_id = str(check.get("id", "")).strip()
+        repo_evidence = collect_repo_evidence(check)
+        log_evidence = collect_log_evidence(student_report_excerpt, summary_excerpt)
+        vm_snapshot = collect_vm_evidence(server_ip or "", vm_username)
+        taxonomy = _classify_failure_taxonomy(status, details, likely)
+        source_status = {
+            "check_data": repo_evidence.get("status", "ok"),
+            "student_report": "ok" if log_evidence.get("student_report_excerpt") else "missing",
+            "summary_report": "ok" if log_evidence.get("summary_excerpt") else "missing",
+            "vm_snapshot": vm_snapshot.get("status", "unknown"),
+        }
+        diagnostic_status = _derive_diagnostic_status(source_status)
+
         check["diagnostic"] = {
             "version": "v1",
             "lab_id": lab_id,
             "task_id": task_id,
+            "check_id": check_id,
             "generated_at": generated_at,
+            "attempt_no": used_attempts_after_run,
+            "status": status,
+            "failure_taxonomy": taxonomy,
+            "failure_status": "active" if status != "PASS" else "none",
+            "diagnostic_status": diagnostic_status,
+            "what_failed": str(check.get("what_failed") or check.get("short_reason") or "").strip(),
             "root_cause": inferred,
-            "evidence": details[:1500],
+            "why_failed": str(check.get("why_failed") or inferred).strip(),
+            "evidence": repo_evidence.get("evidence_text", ""),
+            "evidence_lines": repo_evidence.get("evidence_lines", []),
             "recommended_steps": next_steps[:5],
+            "what_to_do_next": next_steps[:5],
+            "confidence": "medium",
+            "sources": source_status,
+            "report_context": log_evidence,
+            "vm_snapshot": vm_snapshot,
         }
+        # Keep taxonomy on the check record as well for easier downstream aggregation.
+        check["failure_taxonomy"] = taxonomy
         check["escalation_state"] = "completed"
         completed += 1
 
@@ -222,11 +396,27 @@ def _build_details_json(
     task_id: str,
     result,
     used_attempts_after_run: int,
+    *,
+    server_ip: str | None = None,
+    vm_username: str | None = None,
 ) -> tuple[int | None, int | None, int | None, str, int]:
     """Build DB-ready details JSON with escalation state applied."""
     passed, failed, total, checks = _parse_results_jsonl(result)
     triggered_count = _apply_escalation_policy(lab_id, task_id, checks, used_attempts_after_run)
-    completed_count = _run_deep_diagnostics(lab_id, task_id, checks) if triggered_count > 0 else 0
+    student_report_excerpt = _read_report_excerpt(getattr(result, "student_report_path", None))
+    summary_excerpt = _read_report_excerpt(getattr(result, "summary_html_path", None))
+    completed_count = 0
+    if triggered_count > 0:
+        completed_count = _run_deep_diagnostics(
+            lab_id,
+            task_id,
+            checks,
+            used_attempts_after_run,
+            server_ip=server_ip,
+            vm_username=vm_username,
+            student_report_excerpt=student_report_excerpt,
+            summary_excerpt=summary_excerpt,
+        )
     details_json = json.dumps(checks, ensure_ascii=False) if checks else ""
     return passed, failed, total, details_json, completed_count
 
@@ -440,6 +630,8 @@ async def callback_check_task(callback: CallbackQuery, db_user: User, state: FSM
         task_id=task_id,
         result=result,
         used_attempts_after_run=attempts + 1,
+        server_ip=server_ip or None,
+        vm_username=vm_username or None,
     )
 
     # Save result to DB
@@ -595,6 +787,8 @@ async def process_server_ip(message: Message, db_user: User, state: FSMContext) 
         task_id=task_id,
         result=result,
         used_attempts_after_run=attempts + 1,
+        server_ip=text,
+        vm_username=None,
     )
 
     await save_result(
@@ -724,6 +918,8 @@ async def process_vm_username(message: Message, db_user: User, state: FSMContext
         task_id=task_id,
         result=result,
         used_attempts_after_run=attempts + 1,
+        server_ip=server_ip or None,
+        vm_username=text,
     )
 
     await save_result(
@@ -834,6 +1030,8 @@ async def process_lms_key(message: Message, db_user: User, state: FSMContext) ->
         task_id=task_id,
         result=result,
         used_attempts_after_run=attempts + 1,
+        server_ip=server_ip or None,
+        vm_username=vm_username or None,
     )
 
     await save_result(

@@ -39,6 +39,10 @@ class StructuredFeedback(BaseModel):
     detailed_reason: str = Field(default="")
     likely_cause: str = Field(default="")
     next_steps: List[str] = Field(default_factory=list)
+    # v1 aliases for student tutor mode payload consistency
+    what_failed: str = Field(default="")
+    why_failed: str = Field(default="")
+    what_to_do_next: List[str] = Field(default_factory=list)
     hint: str = Field(default="")
     escalation_state: EscalationState = Field(default="none")
 

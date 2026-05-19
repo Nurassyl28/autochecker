@@ -39,9 +39,12 @@ def build_structured_feedback(
     if result is None:
         return result
 
-    status = result.get("status", "ERROR")
-    details = (result.get("details") or "").strip()
-    hint = (result.get("hint") or "").strip()
+    status_raw = str(result.get("status", "ERROR") or "ERROR").upper().strip()
+    status = status_raw if status_raw in {"PASS", "FAIL", "ERROR"} else "ERROR"
+    result["status"] = status
+
+    details = str(result.get("details") or "").strip()
+    hint = str(result.get("hint") or "").strip()
 
     tutoring = getattr(check_spec, "tutoring", None) if check_spec is not None else None
     escalation = getattr(check_spec, "escalation", None) if check_spec is not None else None
@@ -87,10 +90,17 @@ def build_structured_feedback(
             result["next_steps"] = list(tutoring.next_steps)
         else:
             result["next_steps"] = []
+    elif not isinstance(result.get("next_steps"), list):
+        result["next_steps"] = [str(result.get("next_steps"))] if result.get("next_steps") else []
+
+    # keep list payload string-only for stable serialization
+    result["next_steps"] = [str(s).strip() for s in result.get("next_steps", []) if str(s).strip()]
 
     # hint preserved; ensure key exists
     if "hint" not in result:
         result["hint"] = hint
+    else:
+        result["hint"] = str(result.get("hint") or "").strip()
 
     # escalation_state: "eligible" if spec enables escalation and the check didn't pass
     if "escalation_state" not in result:
@@ -98,6 +108,21 @@ def build_structured_feedback(
             result["escalation_state"] = "eligible"
         else:
             result["escalation_state"] = "none"
+
+    # Student tutor mode aliases (backward-compatible with existing fields)
+    if "what_failed" not in result:
+        result["what_failed"] = result.get("short_reason", "")
+    if "why_failed" not in result:
+        result["why_failed"] = result.get("likely_cause") or result.get("detailed_reason", "")
+    if "what_to_do_next" not in result:
+        result["what_to_do_next"] = list(result.get("next_steps") or [])
+
+    result["what_failed"] = str(result.get("what_failed") or "").strip()
+    result["why_failed"] = str(result.get("why_failed") or "").strip()
+    if not isinstance(result.get("what_to_do_next"), list):
+        raw_next = result.get("what_to_do_next")
+        result["what_to_do_next"] = [str(raw_next)] if raw_next else []
+    result["what_to_do_next"] = [str(s).strip() for s in result.get("what_to_do_next", []) if str(s).strip()]
 
     return result
 

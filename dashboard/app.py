@@ -1235,10 +1235,43 @@ def _extract_common_failure_keys(check: dict) -> list[str]:
     if _is_pass_status(check):
         return []
     check_id = str(check.get("id", "")).strip() or "unknown_check"
+    diagnostic = check.get("diagnostic") if isinstance(check.get("diagnostic"), dict) else {}
+    taxonomy = str(
+        diagnostic.get("failure_taxonomy")
+        or check.get("failure_taxonomy")
+        or ""
+    ).strip()
+    if taxonomy:
+        return [f"{check_id} :: taxonomy:{taxonomy}"]
     short_reason = str(check.get("short_reason", "")).strip()
     likely_cause = str(check.get("likely_cause", "")).strip()
     base = likely_cause or short_reason or str(check.get("details", "")).strip()[:140] or "unspecified failure"
     return [f"{check_id} :: {base}"]
+
+
+def _taxonomy_suggestion(pattern: str) -> str:
+    """Return an intervention suggestion for a taxonomy-based failure pattern."""
+    if "taxonomy:missing_resource" in pattern:
+        return "Show required file/path checklist and verify names/casing before re-run."
+    if "taxonomy:timeout" in pattern:
+        return "Ask student to collect service startup logs and validate runtime health before check."
+    if "taxonomy:permission_access" in pattern:
+        return "Review auth/permissions setup with a minimal reproducible access test."
+    if "taxonomy:connectivity" in pattern:
+        return "Validate VM/network reachability first, then retry a single focused check."
+    if "taxonomy:runtime_error" in pattern:
+        return "Inspect traceback root cause and apply one targeted fix before full re-run."
+    if "taxonomy:requirement_mismatch" in pattern:
+        return "Compare solution against rubric line-by-line and fix the first failing requirement."
+    return "Prepare a short targeted clarification and one reproducible fix example."
+
+
+def _extract_taxonomy_from_pattern(pattern: str) -> str:
+    """Extract taxonomy token from normalized failure pattern."""
+    marker = "taxonomy:"
+    if marker not in pattern:
+        return "unclassified"
+    return pattern.split(marker, 1)[1].strip() or "unclassified"
 
 
 async def _load_latest_results_rows(
@@ -1638,6 +1671,16 @@ async def api_teacher_summary_student(
 
     completion_rate = round((pass_count / len(student_rows) * 100), 1) if student_rows else 0.0
     top_failures = [{"pattern": k, "count": v} for k, v in fail_counter.most_common(5)]
+    taxonomy_counter: Counter[str] = Counter()
+    for item in top_failures:
+        taxonomy_counter[_extract_taxonomy_from_pattern(item["pattern"])] += int(item["count"])
+    suggestions = [_taxonomy_suggestion(item["pattern"]) for item in top_failures[:3]]
+    if not suggestions:
+        suggestions = [
+            "Focus on the most frequent failure pattern first.",
+            "Ask the student to submit logs/evidence for the failed step.",
+            "Re-run one task after a targeted fix to validate progress.",
+        ]
 
     return JSONResponse({
         "student": github_alias,
@@ -1645,11 +1688,8 @@ async def api_teacher_summary_student(
         "completion_rate": completion_rate,
         "tasks": tasks,
         "common_failures": top_failures,
-        "intervention_suggestions": [
-            "Focus on the most frequent failure pattern first.",
-            "Ask the student to submit logs/evidence for the failed step.",
-            "Re-run one task after a targeted fix to validate progress.",
-        ],
+        "failure_taxonomy_breakdown": dict(taxonomy_counter),
+        "intervention_suggestions": suggestions,
     })
 
 
@@ -1695,6 +1735,10 @@ async def api_teacher_summary_task(
                 fail_counter[key] += 1
 
     pass_rate = round((pass_students / total_students * 100), 1) if total_students else 0.0
+    top_failures = [{"pattern": k, "count": v} for k, v in fail_counter.most_common(10)]
+    taxonomy_counter: Counter[str] = Counter()
+    for item in top_failures:
+        taxonomy_counter[_extract_taxonomy_from_pattern(item["pattern"])] += int(item["count"])
     return JSONResponse({
         "lab_id": lab_id,
         "task_id": task_id,
@@ -1702,8 +1746,10 @@ async def api_teacher_summary_task(
         "students_total": total_students,
         "students_passed": pass_students,
         "pass_rate": pass_rate,
-        "common_failures": [{"pattern": k, "count": v} for k, v in fail_counter.most_common(10)],
+        "common_failures": top_failures,
+        "failure_taxonomy_breakdown": dict(taxonomy_counter),
         "escalation_states": dict(escalation_counter),
+        "intervention_suggestions": [_taxonomy_suggestion(item["pattern"]) for item in top_failures[:5]],
     })
 
 
@@ -1760,14 +1806,18 @@ async def api_teacher_summary_cohort(
         interventions.append({
             "pattern": pattern,
             "count": count,
-            "suggestion": "Prepare a short targeted clarification and one reproducible fix example.",
+            "suggestion": _taxonomy_suggestion(pattern),
         })
+    taxonomy_counter: Counter[str] = Counter()
+    for pattern, count in cohort_failures.items():
+        taxonomy_counter[_extract_taxonomy_from_pattern(pattern)] += int(count)
 
     return JSONResponse({
         "tenant_id": scope_tenant,
         "lab_id": lab_id or "all",
         "groups": group_summaries,
         "common_failures": [{"pattern": k, "count": v} for k, v in cohort_failures.most_common(15)],
+        "failure_taxonomy_breakdown": dict(taxonomy_counter),
         "interventions": interventions,
     })
 
