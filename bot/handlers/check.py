@@ -5,6 +5,7 @@ import functools
 import json
 import os
 import re
+from datetime import datetime, timezone
 
 import requests
 
@@ -19,7 +20,13 @@ from ..database import User, get_attempts_count, get_effective_attempt_limit, ad
 from ..ip_utils import validate_ip
 from ..keyboards import get_labs_keyboard, get_tasks_keyboard
 from ..runner import run_check
-from ..config import ACTIVE_LABS, get_tasks_needing_ip, get_tasks_needing_lms_key, get_tasks_needing_vm_username
+from ..config import (
+    ACTIVE_LABS,
+    get_task_escalation_thresholds,
+    get_tasks_needing_ip,
+    get_tasks_needing_lms_key,
+    get_tasks_needing_vm_username,
+)
 
 router = Router()
 
@@ -85,6 +92,333 @@ def _parse_summary_html(path) -> str | None:
         return "\n".join(line for line in lines if line) or None
     except Exception:
         return None
+
+
+def _parse_results_jsonl(result) -> tuple[int | None, int | None, int | None, list[dict]]:
+    """Extract score summary and per-check records from results.jsonl."""
+    passed = None
+    failed = None
+    total = None
+    checks: list[dict] = []
+
+    if not result.results_json_path or not result.results_json_path.exists():
+        return passed, failed, total, checks
+
+    try:
+        with open(result.results_json_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        if lines:
+            data = json.loads(lines[0].strip())
+            passed = data.get("passed_checks")
+            failed = data.get("failed_checks")
+            total = data.get("total_checks")
+
+        for line in lines[1:]:
+            line = line.strip()
+            if line:
+                checks.append(json.loads(line))
+    except (json.JSONDecodeError, IOError):
+        pass
+
+    return passed, failed, total, checks
+
+
+def _apply_escalation_policy(
+    lab_id: str,
+    task_id: str,
+    checks: list[dict],
+    used_attempts_after_run: int,
+) -> int:
+    """Update escalation_state based on attempt count and spec thresholds.
+
+    Returns number of checks that reached `triggered` state.
+    """
+    thresholds = get_task_escalation_thresholds(lab_id, task_id)
+    if not thresholds:
+        return 0
+
+    triggered_count = 0
+    for check in checks:
+        check_id = (check.get("id") or "").strip()
+        threshold = thresholds.get(check_id)
+        if not threshold:
+            continue
+
+        if check.get("status") == "PASS":
+            check["escalation_state"] = "none"
+            continue
+
+        if used_attempts_after_run >= threshold:
+            check["escalation_state"] = "triggered"
+            triggered_count += 1
+        else:
+            check["escalation_state"] = "eligible"
+
+    return triggered_count
+
+
+def _infer_likely_cause(status: str, details: str, likely_cause: str) -> str:
+    """Infer a concise likely-cause text when the check has none."""
+    if likely_cause:
+        return likely_cause
+    text = f"{status} {details}".lower()
+    if "not found" in text or "does not exist" in text:
+        return "Missing required file/resource."
+    if "timeout" in text:
+        return "Service/process did not respond in time."
+    if "permission" in text or "denied" in text:
+        return "Permission or access configuration issue."
+    if "traceback" in text or "error" in text:
+        return "Runtime/configuration error during execution."
+    return "Requirement is not satisfied by current repository/runtime state."
+
+
+def _extract_evidence_lines(details: str, max_lines: int = 5) -> list[str]:
+    """Extract concise evidence lines from details for diagnostic payload."""
+    if not details:
+        return []
+    lines = [line.strip() for line in details.splitlines() if line.strip()]
+    if not lines:
+        return []
+    return lines[:max_lines]
+
+
+def _classify_failure_taxonomy(status: str, details: str, likely_cause: str) -> str:
+    """Map a failure into a stable taxonomy bucket for analytics."""
+    if str(status).upper() == "PASS":
+        return "pass"
+    text = f"{status} {details} {likely_cause}".lower()
+    if "not found" in text or "does not exist" in text or "missing" in text:
+        return "missing_resource"
+    if "timeout" in text:
+        return "timeout"
+    if "permission" in text or "denied" in text or "forbidden" in text or "unauthorized" in text:
+        return "permission_access"
+    if "connection" in text or "refused" in text or "unreachable" in text:
+        return "connectivity"
+    if "traceback" in text or "exception" in text or "error" in text:
+        return "runtime_error"
+    return "requirement_mismatch"
+
+
+def _read_report_excerpt(path, max_chars: int = 1200) -> str:
+    """Read a short excerpt from a report file for diagnostics."""
+    if not path:
+        return ""
+    try:
+        if not path.exists():
+            return ""
+        text = path.read_text(encoding="utf-8")
+        text = text.strip()
+        return text[:max_chars]
+    except Exception:
+        return ""
+
+
+def collect_repo_evidence(check: dict) -> dict:
+    """Collect repo/check-level evidence from the structured check payload."""
+    details = str(check.get("details", "")).strip()
+    return {
+        "status": "ok",
+        "check_id": str(check.get("id", "")).strip(),
+        "short_reason": str(check.get("short_reason", "")).strip(),
+        "likely_cause": str(check.get("likely_cause", "")).strip(),
+        "evidence_text": details[:1500],
+        "evidence_lines": _extract_evidence_lines(details),
+    }
+
+
+def collect_log_evidence(student_report_excerpt: str, summary_excerpt: str) -> dict:
+    """Collect report/log evidence excerpts produced by the checker."""
+    status = "ok" if student_report_excerpt or summary_excerpt else "missing"
+    return {
+        "status": status,
+        "student_report_excerpt": student_report_excerpt,
+        "summary_excerpt": summary_excerpt,
+    }
+
+
+def collect_vm_evidence(server_ip: str, vm_username: str | None, timeout: int = 10) -> dict:
+    """Collect minimal VM snapshot via relay SSH with retries and explicit status."""
+    relay_token = os.environ.get("RELAY_TOKEN", "")
+    if not relay_token:
+        return {"status": "unavailable", "reason": "relay_token_missing"}
+    if not server_ip:
+        return {"status": "skipped", "reason": "server_ip_missing"}
+
+    relay_url = os.environ.get("RELAY_URL", "http://dashboard:8000/relay/ssh")
+    username = (vm_username or "autochecker").strip() or "autochecker"
+    command = (
+        "set -o pipefail; "
+        "echo __DIAG_BEGIN__; "
+        "whoami; "
+        "uname -a; "
+        "pwd; "
+        "ls -la | head -n 20; "
+        "echo __DIAG_END__"
+    )
+
+    last_error = ""
+    for attempt in range(1, 3):
+        try:
+            resp = requests.post(
+                relay_url,
+                json={
+                    "host": server_ip,
+                    "port": 22,
+                    "username": username,
+                    "command": command,
+                    "timeout": timeout,
+                },
+                headers={"Authorization": f"Bearer {relay_token}"},
+                timeout=timeout + 8,
+            )
+            if resp.status_code != 200:
+                last_error = f"http_{resp.status_code}"
+                continue
+            data = resp.json()
+            if data.get("error"):
+                last_error = str(data.get("error"))[:120]
+                continue
+            stdout = str(data.get("stdout", "")).strip()
+            return {
+                "status": "ok",
+                "attempts": attempt,
+                "host": server_ip,
+                "username": username,
+                "stdout_excerpt": stdout[:1000],
+            }
+        except requests.Timeout:
+            last_error = "timeout"
+        except Exception as exc:
+            last_error = f"exception:{str(exc)[:80]}"
+
+    return {"status": "failed", "attempts": 2, "host": server_ip, "username": username, "reason": last_error}
+
+
+def _derive_diagnostic_status(source_status: dict[str, str]) -> str:
+    """Derive a compact overall diagnostic status from source statuses."""
+    values = list(source_status.values())
+    if values and all(v == "ok" for v in values):
+        return "complete"
+    if any(v == "ok" for v in values):
+        return "partial"
+    if any(v in {"failed", "unavailable"} for v in values):
+        return "degraded"
+    return "missing"
+
+
+def _run_deep_diagnostics(
+    lab_id: str,
+    task_id: str,
+    checks: list[dict],
+    used_attempts_after_run: int,
+    *,
+    server_ip: str | None = None,
+    vm_username: str | None = None,
+    student_report_excerpt: str = "",
+    summary_excerpt: str = "",
+) -> int:
+    """Attach structured diagnostics for checks in `triggered` escalation state.
+
+    Returns number of checks that reached `completed`.
+    """
+    completed = 0
+    generated_at = datetime.now(timezone.utc).isoformat()
+    for check in checks:
+        if check.get("escalation_state") != "triggered":
+            continue
+
+        status = str(check.get("status", "ERROR"))
+        details = str(check.get("details", ""))
+        hint = str(check.get("hint", "")).strip()
+        likely = str(check.get("likely_cause", "")).strip()
+        next_steps = check.get("next_steps") or []
+        if not isinstance(next_steps, list):
+            next_steps = []
+
+        inferred = _infer_likely_cause(status, details, likely)
+        if not next_steps and hint:
+            next_steps = [hint]
+        if not next_steps:
+            next_steps = [
+                "Re-read the failed check requirement and compare it with your current implementation.",
+                "Re-run locally and capture logs/output for the failed step.",
+                "Apply one focused fix, then run check again.",
+            ]
+
+        check_id = str(check.get("id", "")).strip()
+        repo_evidence = collect_repo_evidence(check)
+        log_evidence = collect_log_evidence(student_report_excerpt, summary_excerpt)
+        vm_snapshot = collect_vm_evidence(server_ip or "", vm_username)
+        taxonomy = _classify_failure_taxonomy(status, details, likely)
+        source_status = {
+            "check_data": repo_evidence.get("status", "ok"),
+            "student_report": "ok" if log_evidence.get("student_report_excerpt") else "missing",
+            "summary_report": "ok" if log_evidence.get("summary_excerpt") else "missing",
+            "vm_snapshot": vm_snapshot.get("status", "unknown"),
+        }
+        diagnostic_status = _derive_diagnostic_status(source_status)
+
+        check["diagnostic"] = {
+            "version": "v1",
+            "lab_id": lab_id,
+            "task_id": task_id,
+            "check_id": check_id,
+            "generated_at": generated_at,
+            "attempt_no": used_attempts_after_run,
+            "status": status,
+            "failure_taxonomy": taxonomy,
+            "failure_status": "active" if status != "PASS" else "none",
+            "diagnostic_status": diagnostic_status,
+            "what_failed": str(check.get("what_failed") or check.get("short_reason") or "").strip(),
+            "root_cause": inferred,
+            "why_failed": str(check.get("why_failed") or inferred).strip(),
+            "evidence": repo_evidence.get("evidence_text", ""),
+            "evidence_lines": repo_evidence.get("evidence_lines", []),
+            "recommended_steps": next_steps[:5],
+            "what_to_do_next": next_steps[:5],
+            "confidence": "medium",
+            "sources": source_status,
+            "report_context": log_evidence,
+            "vm_snapshot": vm_snapshot,
+        }
+        # Keep taxonomy on the check record as well for easier downstream aggregation.
+        check["failure_taxonomy"] = taxonomy
+        check["escalation_state"] = "completed"
+        completed += 1
+
+    return completed
+
+
+def _build_details_json(
+    lab_id: str,
+    task_id: str,
+    result,
+    used_attempts_after_run: int,
+    *,
+    server_ip: str | None = None,
+    vm_username: str | None = None,
+) -> tuple[int | None, int | None, int | None, str, int]:
+    """Build DB-ready details JSON with escalation state applied."""
+    passed, failed, total, checks = _parse_results_jsonl(result)
+    triggered_count = _apply_escalation_policy(lab_id, task_id, checks, used_attempts_after_run)
+    student_report_excerpt = _read_report_excerpt(getattr(result, "student_report_path", None))
+    summary_excerpt = _read_report_excerpt(getattr(result, "summary_html_path", None))
+    completed_count = 0
+    if triggered_count > 0:
+        completed_count = _run_deep_diagnostics(
+            lab_id,
+            task_id,
+            checks,
+            used_attempts_after_run,
+            server_ip=server_ip,
+            vm_username=vm_username,
+            student_report_excerpt=student_report_excerpt,
+            summary_excerpt=summary_excerpt,
+        )
+    details_json = json.dumps(checks, ensure_ascii=False) if checks else ""
+    return passed, failed, total, details_json, completed_count
 
 
 async def _get_attempt_window(tg_id: int, lab_id: str, task_id: str) -> tuple[int, int]:
@@ -291,30 +625,14 @@ async def callback_check_task(callback: CallbackQuery, db_user: User, state: FSM
     # Record the attempt
     await add_attempt(db_user.tg_id, lab_id, task_id)
 
-    # Parse score details and per-check breakdown from results JSON
-    passed = None
-    failed = None
-    total = None
-    details_json = ""
-    if result.results_json_path and result.results_json_path.exists():
-        try:
-            with open(result.results_json_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            if lines:
-                data = json.loads(lines[0].strip())
-                passed = data.get("passed_checks")
-                failed = data.get("failed_checks")
-                total = data.get("total_checks")
-            # Lines 2+ are individual check results
-            checks = []
-            for line in lines[1:]:
-                line = line.strip()
-                if line:
-                    checks.append(json.loads(line))
-            if checks:
-                details_json = json.dumps(checks, ensure_ascii=False)
-        except (json.JSONDecodeError, IOError):
-            pass
+    passed, failed, total, details_json, diagnostics_completed = _build_details_json(
+        lab_id=lab_id,
+        task_id=task_id,
+        result=result,
+        used_attempts_after_run=attempts + 1,
+        server_ip=server_ip or None,
+        vm_username=vm_username or None,
+    )
 
     # Save result to DB
     await save_result(
@@ -348,6 +666,11 @@ async def callback_check_task(callback: CallbackQuery, db_user: User, state: FSM
         f"{status_emoji} Check complete for <b>{task_id}</b>!{score_text}\n\n"
         f"Attempts used: {attempts + 1}/{max_attempts}",
     )
+    if diagnostics_completed > 0:
+        await callback.message.answer(
+            f"Deep diagnostics completed for {diagnostics_completed} check(s). "
+            "Open the report for root cause and fix steps."
+        )
 
     # Send feedback to student
     if result.student_report_path and result.student_report_path.exists():
@@ -459,29 +782,14 @@ async def process_server_ip(message: Message, db_user: User, state: FSMContext) 
     # Record the attempt
     await add_attempt(db_user.tg_id, lab_id, task_id)
 
-    # Parse score details
-    passed = None
-    failed = None
-    total = None
-    details_json = ""
-    if result.results_json_path and result.results_json_path.exists():
-        try:
-            with open(result.results_json_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            if lines:
-                score_data = json.loads(lines[0].strip())
-                passed = score_data.get("passed_checks")
-                failed = score_data.get("failed_checks")
-                total = score_data.get("total_checks")
-            checks = []
-            for line in lines[1:]:
-                line = line.strip()
-                if line:
-                    checks.append(json.loads(line))
-            if checks:
-                details_json = json.dumps(checks, ensure_ascii=False)
-        except (json.JSONDecodeError, IOError):
-            pass
+    passed, failed, total, details_json, diagnostics_completed = _build_details_json(
+        lab_id=lab_id,
+        task_id=task_id,
+        result=result,
+        used_attempts_after_run=attempts + 1,
+        server_ip=text,
+        vm_username=None,
+    )
 
     await save_result(
         tg_id=db_user.tg_id, lab_id=lab_id, task_id=task_id,
@@ -506,6 +814,11 @@ async def process_server_ip(message: Message, db_user: User, state: FSMContext) 
         f"{status_emoji} Check complete for <b>{task_id}</b>!{score_text}\n\n"
         f"Attempts used: {attempts + 1}/{max_attempts}",
     )
+    if diagnostics_completed > 0:
+        await message.answer(
+            f"Deep diagnostics completed for {diagnostics_completed} check(s). "
+            "Open the report for root cause and fix steps."
+        )
 
     if result.student_report_path and result.student_report_path.exists():
         try:
@@ -600,28 +913,14 @@ async def process_vm_username(message: Message, db_user: User, state: FSMContext
 
     await add_attempt(db_user.tg_id, lab_id, task_id)
 
-    passed = None
-    failed = None
-    total = None
-    details_json = ""
-    if result.results_json_path and result.results_json_path.exists():
-        try:
-            with open(result.results_json_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            if lines:
-                score_data = json.loads(lines[0].strip())
-                passed = score_data.get("passed_checks")
-                failed = score_data.get("failed_checks")
-                total = score_data.get("total_checks")
-            checks = []
-            for line in lines[1:]:
-                line = line.strip()
-                if line:
-                    checks.append(json.loads(line))
-            if checks:
-                details_json = json.dumps(checks, ensure_ascii=False)
-        except (json.JSONDecodeError, IOError):
-            pass
+    passed, failed, total, details_json, diagnostics_completed = _build_details_json(
+        lab_id=lab_id,
+        task_id=task_id,
+        result=result,
+        used_attempts_after_run=attempts + 1,
+        server_ip=server_ip or None,
+        vm_username=text,
+    )
 
     await save_result(
         tg_id=db_user.tg_id, lab_id=lab_id, task_id=task_id,
@@ -646,6 +945,11 @@ async def process_vm_username(message: Message, db_user: User, state: FSMContext
         f"{status_emoji} Check complete for <b>{task_id}</b>!{score_text}\n\n"
         f"Attempts used: {attempts + 1}/{max_attempts}",
     )
+    if diagnostics_completed > 0:
+        await message.answer(
+            f"Deep diagnostics completed for {diagnostics_completed} check(s). "
+            "Open the report for root cause and fix steps."
+        )
 
     if result.student_report_path and result.student_report_path.exists():
         try:
@@ -721,28 +1025,14 @@ async def process_lms_key(message: Message, db_user: User, state: FSMContext) ->
 
     await add_attempt(db_user.tg_id, lab_id, task_id)
 
-    passed = None
-    failed = None
-    total = None
-    details_json = ""
-    if result.results_json_path and result.results_json_path.exists():
-        try:
-            with open(result.results_json_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            if lines:
-                score_data = json.loads(lines[0].strip())
-                passed = score_data.get("passed_checks")
-                failed = score_data.get("failed_checks")
-                total = score_data.get("total_checks")
-            checks = []
-            for line in lines[1:]:
-                line = line.strip()
-                if line:
-                    checks.append(json.loads(line))
-            if checks:
-                details_json = json.dumps(checks, ensure_ascii=False)
-        except (json.JSONDecodeError, IOError):
-            pass
+    passed, failed, total, details_json, diagnostics_completed = _build_details_json(
+        lab_id=lab_id,
+        task_id=task_id,
+        result=result,
+        used_attempts_after_run=attempts + 1,
+        server_ip=server_ip or None,
+        vm_username=vm_username or None,
+    )
 
     await save_result(
         tg_id=db_user.tg_id, lab_id=lab_id, task_id=task_id,
@@ -767,6 +1057,11 @@ async def process_lms_key(message: Message, db_user: User, state: FSMContext) ->
         f"{status_emoji} Check complete for <b>{task_id}</b>!{score_text}\n\n"
         f"Attempts used: {attempts + 1}/{max_attempts}",
     )
+    if diagnostics_completed > 0:
+        await message.answer(
+            f"Deep diagnostics completed for {diagnostics_completed} check(s). "
+            "Open the report for root cause and fix steps."
+        )
 
     if result.student_report_path and result.student_report_path.exists():
         try:

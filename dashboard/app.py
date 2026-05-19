@@ -10,12 +10,15 @@ import json
 import logging
 import os
 import uuid
+from collections import Counter, defaultdict
 from datetime import date
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urlencode
 
 import aiosqlite
+import psycopg
+from psycopg.rows import dict_row
 import yaml
 from fastapi import FastAPI, Form, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
@@ -25,6 +28,9 @@ logger = logging.getLogger(__name__)
 
 _BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = os.getenv("DB_PATH", str(_BASE_DIR / "bot.db"))
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+USE_POSTGRES = bool(DATABASE_URL)
+DEFAULT_TENANT_ID = os.getenv("DEFAULT_TENANT_ID", "default")
 SPECS_DIR = _BASE_DIR / "specs"
 ACTIVE_LABS = [l.strip() for l in os.getenv("ACTIVE_LABS", "").split(",") if l.strip()]
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
@@ -38,14 +44,78 @@ COOKIE_NAME = "dash_auth"
 app = FastAPI(title="Autochecker Dashboard")
 
 
+def _to_pg_query(sql: str) -> str:
+    return sql.replace("?", "%s")
+
+
+def _pg_fetchone_sync(sql: str, params: tuple = ()) -> Optional[dict]:
+    with psycopg.connect(DATABASE_URL, row_factory=dict_row, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(_to_pg_query(sql), params)
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def _pg_fetchall_sync(sql: str, params: tuple = ()) -> list[dict]:
+    with psycopg.connect(DATABASE_URL, row_factory=dict_row, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(_to_pg_query(sql), params)
+            return [dict(r) for r in cur.fetchall()]
+
+
+def _pg_execute_sync(sql: str, params: tuple = ()) -> None:
+    with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(_to_pg_query(sql), params)
+
+
 @app.on_event("startup")
 async def _ensure_dashboard_tables():
     """Create dashboard-owned compatibility tables if they don't exist."""
     try:
+        if USE_POSTGRES:
+            await asyncio.to_thread(
+                _pg_execute_sync,
+                """
+                CREATE TABLE IF NOT EXISTS api_access_log (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
+                    email TEXT NOT NULL,
+                    endpoint TEXT NOT NULL,
+                    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """,
+            )
+            await asyncio.to_thread(
+                _pg_execute_sync,
+                "CREATE INDEX IF NOT EXISTS idx_api_access_email ON api_access_log(tenant_id, email)",
+            )
+            await asyncio.to_thread(
+                _pg_execute_sync,
+                """
+                CREATE TABLE IF NOT EXISTS attempt_grants (
+                    id BIGSERIAL PRIMARY KEY,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
+                    tg_id BIGINT NOT NULL,
+                    lab_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL DEFAULT '',
+                    amount INTEGER NOT NULL,
+                    reason TEXT DEFAULT '',
+                    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """,
+            )
+            await asyncio.to_thread(
+                _pg_execute_sync,
+                "CREATE INDEX IF NOT EXISTS idx_attempt_grants_lookup ON attempt_grants(tenant_id, tg_id, lab_id, task_id)",
+            )
+            return
+
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS api_access_log (
                     id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
                     email     TEXT NOT NULL,
                     endpoint  TEXT NOT NULL,
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -58,6 +128,7 @@ async def _ensure_dashboard_tables():
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS attempt_grants (
                     id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
                     tg_id     INTEGER NOT NULL,
                     lab_id    TEXT NOT NULL,
                     task_id   TEXT NOT NULL DEFAULT '',
@@ -71,6 +142,12 @@ async def _ensure_dashboard_tables():
                 """CREATE INDEX IF NOT EXISTS idx_attempt_grants_lookup
                    ON attempt_grants(tg_id, lab_id, task_id)"""
             )
+            # Compat for older DBs created before tenant_id columns existed
+            for table in ("users", "results", "attempts", "attempt_grants", "api_access_log"):
+                async with db.execute(f"PRAGMA table_info({table})") as cur:
+                    cols = [row[1] async for row in cur]
+                if cols and "tenant_id" not in cols:
+                    await db.execute(f"ALTER TABLE {table} ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
             await db.commit()
     except Exception:
         logger.warning("Could not ensure dashboard tables", exc_info=True)
@@ -268,6 +345,42 @@ async def _fetch_best_scores(db: aiosqlite.Connection) -> dict[int, dict[str, di
     return scores
 
 
+async def _fetch_best_scores_pg() -> dict[int, dict[str, dict]]:
+    """PostgreSQL variant of best-result-per-task aggregation."""
+    rows = await asyncio.to_thread(
+        _pg_fetchall_sync,
+        """
+        SELECT tg_id, lab_id, task_id, score, passed, failed, total
+        FROM results
+        WHERE tenant_id = %s
+        ORDER BY tg_id, lab_id, task_id
+        """,
+        (DEFAULT_TENANT_ID,),
+    )
+    scores: dict[int, dict[str, dict]] = {}
+    for row in rows:
+        key = f"{row['lab_id']}:{row['task_id']}"
+        entry = {
+            "score": row["score"] or "—",
+            "passed": row["passed"],
+            "failed": row["failed"],
+            "total": row["total"],
+        }
+        entry["status"] = _cell_status(entry["passed"], entry["failed"], entry["total"])
+        entry["pct"] = _cell_pct(entry["passed"], entry["total"])
+        prev = scores.setdefault(row["tg_id"], {}).get(key)
+        if prev is None:
+            scores[row["tg_id"]][key] = entry
+        else:
+            prev_p = prev["passed"] if prev["passed"] is not None else 0
+            cur_p = entry["passed"] if entry["passed"] is not None else 0
+            prev_np = (prev["total"] or 0) - prev_p
+            cur_np = (entry["total"] or 0) - cur_p
+            if (-cur_p, cur_np) < (-prev_p, prev_np):
+                scores[row["tg_id"]][key] = entry
+    return scores
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -283,41 +396,79 @@ async def index(request: Request, lab: Optional[str] = Query(default=None)):
     # Filter tasks by selected lab
     tasks = [t for t in task_meta if t["lab_id"] == active_lab] if active_lab else task_meta
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-
-        students = []
-        async with db.execute(
-            "SELECT tg_id, email, github_alias, tg_username, student_group FROM users ORDER BY github_alias"
-        ) as cur:
-            async for row in cur:
-                students.append(dict(row))
-
-        scores = await _fetch_best_scores(db)
-
-        # Latest submission timestamp per student
-        last_submission: dict[int, str] = {}
-        async with db.execute(
-            "SELECT tg_id, MAX(timestamp) AS last_ts FROM results GROUP BY tg_id"
-        ) as cur:
-            async for row in cur:
-                last_submission[row["tg_id"]] = row["last_ts"] or ""
-
-        # Attempts per student per task: {tg_id: {"lab:task": count}}
+    if USE_POSTGRES:
+        students = await asyncio.to_thread(
+            _pg_fetchall_sync,
+            """SELECT tg_id, email, github_alias, tg_username, student_group
+               FROM users WHERE tenant_id = %s ORDER BY github_alias""",
+            (DEFAULT_TENANT_ID,),
+        )
+        scores = await _fetch_best_scores_pg()
+        last_rows = await asyncio.to_thread(
+            _pg_fetchall_sync,
+            """SELECT tg_id, MAX(timestamp) AS last_ts
+               FROM results WHERE tenant_id = %s GROUP BY tg_id""",
+            (DEFAULT_TENANT_ID,),
+        )
+        last_submission = {row["tg_id"]: (row["last_ts"] or "") for row in last_rows}
+        attempt_rows = await asyncio.to_thread(
+            _pg_fetchall_sync,
+            """SELECT tg_id, lab_id, task_id, COUNT(*) AS cnt
+               FROM attempts
+               WHERE tenant_id = %s
+               GROUP BY tg_id, lab_id, task_id""",
+            (DEFAULT_TENANT_ID,),
+        )
         attempts_map: dict[int, dict[str, int]] = {}
-        async with db.execute(
-            "SELECT tg_id, lab_id, task_id, COUNT(*) AS cnt FROM attempts GROUP BY tg_id, lab_id, task_id"
-        ) as cur:
-            async for row in cur:
-                attempts_map.setdefault(row["tg_id"], {})[f"{row['lab_id']}:{row['task_id']}"] = row["cnt"]
-
-        attempt_grants_map: dict[int, dict[str, int]] = {}
-        async with db.execute(
+        for row in attempt_rows:
+            attempts_map.setdefault(row["tg_id"], {})[f"{row['lab_id']}:{row['task_id']}"] = row["cnt"]
+        grant_rows = await asyncio.to_thread(
+            _pg_fetchall_sync,
             """SELECT tg_id, lab_id, task_id, COALESCE(SUM(amount), 0) AS granted
-               FROM attempt_grants GROUP BY tg_id, lab_id, task_id"""
-        ) as cur:
-            async for row in cur:
-                attempt_grants_map.setdefault(row["tg_id"], {})[f"{row['lab_id']}:{row['task_id']}"] = int(row["granted"] or 0)
+               FROM attempt_grants
+               WHERE tenant_id = %s
+               GROUP BY tg_id, lab_id, task_id""",
+            (DEFAULT_TENANT_ID,),
+        )
+        attempt_grants_map: dict[int, dict[str, int]] = {}
+        for row in grant_rows:
+            attempt_grants_map.setdefault(row["tg_id"], {})[f"{row['lab_id']}:{row['task_id']}"] = int(row["granted"] or 0)
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+
+            students = []
+            async with db.execute(
+                "SELECT tg_id, email, github_alias, tg_username, student_group FROM users ORDER BY github_alias"
+            ) as cur:
+                async for row in cur:
+                    students.append(dict(row))
+
+            scores = await _fetch_best_scores(db)
+
+            # Latest submission timestamp per student
+            last_submission: dict[int, str] = {}
+            async with db.execute(
+                "SELECT tg_id, MAX(timestamp) AS last_ts FROM results GROUP BY tg_id"
+            ) as cur:
+                async for row in cur:
+                    last_submission[row["tg_id"]] = row["last_ts"] or ""
+
+            # Attempts per student per task: {tg_id: {"lab:task": count}}
+            attempts_map: dict[int, dict[str, int]] = {}
+            async with db.execute(
+                "SELECT tg_id, lab_id, task_id, COUNT(*) AS cnt FROM attempts GROUP BY tg_id, lab_id, task_id"
+            ) as cur:
+                async for row in cur:
+                    attempts_map.setdefault(row["tg_id"], {})[f"{row['lab_id']}:{row['task_id']}"] = row["cnt"]
+
+            attempt_grants_map: dict[int, dict[str, int]] = {}
+            async with db.execute(
+                """SELECT tg_id, lab_id, task_id, COALESCE(SUM(amount), 0) AS granted
+                   FROM attempt_grants GROUP BY tg_id, lab_id, task_id"""
+            ) as cur:
+                async for row in cur:
+                    attempt_grants_map.setdefault(row["tg_id"], {})[f"{row['lab_id']}:{row['task_id']}"] = int(row["granted"] or 0)
 
     # Attach last_submission to each student dict
     for s in students:
@@ -412,39 +563,95 @@ async def student_detail(
     task_meta_map = {f"{t['lab_id']}:{t['task_id']}": t for t in task_meta}
     title_map = {key: value["title"] for key, value in task_meta_map.items()}
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-
-        async with db.execute(
-            "SELECT tg_id, email, github_alias, tg_username, server_ip, student_group, vm_username FROM users WHERE github_alias = ?",
-            (github_alias,)
-        ) as cur:
-            student_row = await cur.fetchone()
-
+    if USE_POSTGRES:
+        student_row = await asyncio.to_thread(
+            _pg_fetchone_sync,
+            """SELECT tg_id, email, github_alias, tg_username, server_ip, student_group, vm_username
+               FROM users WHERE tenant_id = %s AND github_alias = %s""",
+            (DEFAULT_TENANT_ID, github_alias),
+        )
         if not student_row:
             return HTMLResponse("<h1>Student not found</h1>", status_code=404)
-
         student = dict(student_row)
-
-        results = []
-        async with db.execute(
+        raw_results = await asyncio.to_thread(
+            _pg_fetchall_sync,
             """SELECT lab_id, task_id, score, passed, failed, total, details, timestamp
-               FROM results WHERE tg_id = ? ORDER BY timestamp DESC""",
-            (student["tg_id"],)
-        ) as cur:
-            async for row in cur:
-                r = dict(row)
-                key = f"{r['lab_id']}:{r['task_id']}"
-                r["title"] = title_map.get(key, r["task_id"])
-                r["status"] = _cell_status(r["passed"], r["failed"], r["total"])
-                # Parse per-check details JSON
-                r["checks"] = []
-                if r.get("details"):
-                    try:
+               FROM results
+               WHERE tenant_id = %s AND tg_id = %s
+               ORDER BY timestamp DESC""",
+            (DEFAULT_TENANT_ID, student["tg_id"]),
+        )
+        results = []
+        for r in raw_results:
+            key = f"{r['lab_id']}:{r['task_id']}"
+            r["title"] = title_map.get(key, r["task_id"])
+            r["status"] = _cell_status(r["passed"], r["failed"], r["total"])
+            r["checks"] = []
+            if r.get("details"):
+                try:
+                    # PG jsonb may come as list/dict directly
+                    if isinstance(r["details"], str):
                         r["checks"] = json.loads(r["details"])
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-                results.append(r)
+                    elif isinstance(r["details"], list):
+                        r["checks"] = r["details"]
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            results.append(r)
+        grant_rows = await asyncio.to_thread(
+            _pg_fetchall_sync,
+            """SELECT lab_id, task_id, COALESCE(SUM(amount), 0) AS granted
+               FROM attempt_grants
+               WHERE tenant_id = %s AND tg_id = %s
+               GROUP BY lab_id, task_id""",
+            (DEFAULT_TENANT_ID, student["tg_id"]),
+        )
+        grants_by_task: dict[str, int] = {
+            f"{row['lab_id']}:{row['task_id']}": int(row["granted"] or 0)
+            for row in grant_rows
+        }
+        attempt_rows = await asyncio.to_thread(
+            _pg_fetchall_sync,
+            """SELECT lab_id, task_id, COUNT(*) AS attempts, MAX(timestamp) AS last_attempt
+               FROM attempts
+               WHERE tenant_id = %s AND tg_id = %s
+               GROUP BY lab_id, task_id
+               ORDER BY lab_id, task_id""",
+            (DEFAULT_TENANT_ID, student["tg_id"]),
+        )
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+
+            async with db.execute(
+                "SELECT tg_id, email, github_alias, tg_username, server_ip, student_group, vm_username FROM users WHERE github_alias = ?",
+                (github_alias,)
+            ) as cur:
+                student_row = await cur.fetchone()
+
+            if not student_row:
+                return HTMLResponse("<h1>Student not found</h1>", status_code=404)
+
+            student = dict(student_row)
+
+            results = []
+            async with db.execute(
+                """SELECT lab_id, task_id, score, passed, failed, total, details, timestamp
+                   FROM results WHERE tg_id = ? ORDER BY timestamp DESC""",
+                (student["tg_id"],)
+            ) as cur:
+                async for row in cur:
+                    r = dict(row)
+                    key = f"{r['lab_id']}:{r['task_id']}"
+                    r["title"] = title_map.get(key, r["task_id"])
+                    r["status"] = _cell_status(r["passed"], r["failed"], r["total"])
+                    # Parse per-check details JSON
+                    r["checks"] = []
+                    if r.get("details"):
+                        try:
+                            r["checks"] = json.loads(r["details"])
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                    results.append(r)
 
         # Track tasks with manual overrides
         has_override: set[str] = set()
@@ -472,14 +679,14 @@ async def student_detail(
                 if (-cur_p, cur_np) < (-prev_p, prev_np):
                     latest_by_task[key] = result
 
-        grants_by_task: dict[str, int] = {}
-        async with db.execute(
-            """SELECT lab_id, task_id, COALESCE(SUM(amount), 0) AS granted
-               FROM attempt_grants WHERE tg_id = ? GROUP BY lab_id, task_id""",
-            (student["tg_id"],)
-        ) as cur:
-            async for row in cur:
-                grants_by_task[f"{row['lab_id']}:{row['task_id']}"] = int(row["granted"] or 0)
+            grants_by_task: dict[str, int] = {}
+            async with db.execute(
+                """SELECT lab_id, task_id, COALESCE(SUM(amount), 0) AS granted
+                   FROM attempt_grants WHERE tg_id = ? GROUP BY lab_id, task_id""",
+                (student["tg_id"],)
+            ) as cur:
+                async for row in cur:
+                    grants_by_task[f"{row['lab_id']}:{row['task_id']}"] = int(row["granted"] or 0)
 
         task_attempts_map: dict[str, dict] = {}
         for key, latest in latest_by_task.items():
@@ -501,37 +708,41 @@ async def student_detail(
                 "has_override": key in has_override,
             }
 
-        async with db.execute(
-            """SELECT lab_id, task_id, COUNT(*) AS attempts, MAX(timestamp) AS last_attempt
-               FROM attempts WHERE tg_id = ? GROUP BY lab_id, task_id
-               ORDER BY lab_id, task_id""",
-            (student["tg_id"],)
-        ) as cur:
-            async for row in cur:
-                key = f"{row['lab_id']}:{row['task_id']}"
-                latest = latest_by_task.get(key, {})
-                used = row["attempts"] or 0
-                base_max = task_meta_map.get(key, {}).get("max_attempts", MAX_ATTEMPTS_PER_TASK)
-                granted = grants_by_task.get(key, 0)
-                effective_max = base_max + granted
-                task_attempts_map[key] = {
-                    "lab_id": row["lab_id"],
-                    "task_id": row["task_id"],
-                    "title": title_map.get(key, row["task_id"]),
-                    "attempts": used,
-                    "max_attempts": effective_max,
-                    "remaining": max(0, effective_max - used),
-                    "granted_attempts": granted,
-                    "last_attempt": row["last_attempt"] or "",
-                    "score": latest.get("score") or "—",
-                    "status": latest.get("status", "none"),
-                    "has_override": key in has_override,
-                }
+            attempt_rows = []
+            async with db.execute(
+                """SELECT lab_id, task_id, COUNT(*) AS attempts, MAX(timestamp) AS last_attempt
+                   FROM attempts WHERE tg_id = ? GROUP BY lab_id, task_id
+                   ORDER BY lab_id, task_id""",
+                (student["tg_id"],)
+            ) as cur:
+                async for row in cur:
+                    attempt_rows.append(dict(row))
 
-        task_attempts = sorted(
-            task_attempts_map.values(),
-            key=lambda row: (row["lab_id"], row["task_id"]),
-        )
+    for row in attempt_rows:
+        key = f"{row['lab_id']}:{row['task_id']}"
+        latest = latest_by_task.get(key, {})
+        used = row["attempts"] or 0
+        base_max = task_meta_map.get(key, {}).get("max_attempts", MAX_ATTEMPTS_PER_TASK)
+        granted = grants_by_task.get(key, 0)
+        effective_max = base_max + granted
+        task_attempts_map[key] = {
+            "lab_id": row["lab_id"],
+            "task_id": row["task_id"],
+            "title": title_map.get(key, row["task_id"]),
+            "attempts": used,
+            "max_attempts": effective_max,
+            "remaining": max(0, effective_max - used),
+            "granted_attempts": granted,
+            "last_attempt": row["last_attempt"] or "",
+            "score": latest.get("score") or "—",
+            "status": latest.get("status", "none"),
+            "has_override": key in has_override,
+        }
+
+    task_attempts = sorted(
+        task_attempts_map.values(),
+        key=lambda row: (row["lab_id"], row["task_id"]),
+    )
 
     return templates.TemplateResponse(request, "student.html", {
         "student": student,
@@ -561,34 +772,59 @@ async def student_edit(
     server_ip = server_ip.strip()
     vm_username = vm_username.strip()
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-
-        # Find the student by current alias
-        async with db.execute(
-            "SELECT tg_id FROM users WHERE github_alias = ?", (github_alias,)
-        ) as cur:
-            row = await cur.fetchone()
+    if USE_POSTGRES:
+        row = await asyncio.to_thread(
+            _pg_fetchone_sync,
+            "SELECT tg_id FROM users WHERE tenant_id = %s AND github_alias = %s",
+            (DEFAULT_TENANT_ID, github_alias),
+        )
         if not row:
             return HTMLResponse("<h1>Student not found</h1>", status_code=404)
         tg_id = row["tg_id"]
-
-        # Check uniqueness — email and github_alias must not belong to another student
-        async with db.execute(
-            "SELECT tg_id FROM users WHERE (email = ? OR github_alias = ?) AND tg_id != ?",
-            (email, new_github_alias, tg_id),
-        ) as cur:
-            conflict = await cur.fetchone()
-        if conflict:
-            return RedirectResponse(
-                f"/student/{github_alias}?error=conflict", status_code=302
-            )
-
-        await db.execute(
-            "UPDATE users SET email = ?, github_alias = ?, tg_username = ?, server_ip = ?, vm_username = ? WHERE tg_id = ?",
-            (email, new_github_alias, tg_username, server_ip, vm_username, tg_id),
+        conflict = await asyncio.to_thread(
+            _pg_fetchone_sync,
+            """SELECT tg_id FROM users
+               WHERE tenant_id = %s AND (email = %s OR github_alias = %s) AND tg_id != %s""",
+            (DEFAULT_TENANT_ID, email, new_github_alias, tg_id),
         )
-        await db.commit()
+        if conflict:
+            return RedirectResponse(f"/student/{github_alias}?error=conflict", status_code=302)
+        await asyncio.to_thread(
+            _pg_execute_sync,
+            """UPDATE users
+               SET email = %s, github_alias = %s, tg_username = %s, server_ip = %s, vm_username = %s
+               WHERE tenant_id = %s AND tg_id = %s""",
+            (email, new_github_alias, tg_username, server_ip, vm_username, DEFAULT_TENANT_ID, tg_id),
+        )
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+
+            # Find the student by current alias
+            async with db.execute(
+                "SELECT tg_id FROM users WHERE github_alias = ?", (github_alias,)
+            ) as cur:
+                row = await cur.fetchone()
+            if not row:
+                return HTMLResponse("<h1>Student not found</h1>", status_code=404)
+            tg_id = row["tg_id"]
+
+            # Check uniqueness — email and github_alias must not belong to another student
+            async with db.execute(
+                "SELECT tg_id FROM users WHERE (email = ? OR github_alias = ?) AND tg_id != ?",
+                (email, new_github_alias, tg_id),
+            ) as cur:
+                conflict = await cur.fetchone()
+            if conflict:
+                return RedirectResponse(
+                    f"/student/{github_alias}?error=conflict", status_code=302
+                )
+
+            await db.execute(
+                "UPDATE users SET email = ?, github_alias = ?, tg_username = ?, server_ip = ?, vm_username = ? WHERE tg_id = ?",
+                (email, new_github_alias, tg_username, server_ip, vm_username, tg_id),
+            )
+            await db.commit()
 
     return RedirectResponse(f"/student/{new_github_alias}", status_code=302)
 
@@ -610,38 +846,68 @@ async def student_free_attempts(
     if not lab_id or not task_id:
         return RedirectResponse(f"/student/{github_alias}", status_code=302)
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-
-        async with db.execute(
-            "SELECT tg_id FROM users WHERE github_alias = ?", (github_alias,)
-        ) as cur:
-            row = await cur.fetchone()
+    if USE_POSTGRES:
+        row = await asyncio.to_thread(
+            _pg_fetchone_sync,
+            "SELECT tg_id FROM users WHERE tenant_id = %s AND github_alias = %s",
+            (DEFAULT_TENANT_ID, github_alias),
+        )
         if not row:
             return HTMLResponse("<h1>Student not found</h1>", status_code=404)
         tg_id = row["tg_id"]
-
-        async with db.execute(
-            "SELECT COUNT(*) AS cnt FROM attempts WHERE tg_id = ? AND lab_id = ? AND task_id = ?",
-            (tg_id, lab_id, task_id),
-        ) as cur:
-            count_row = await cur.fetchone()
+        count_row = await asyncio.to_thread(
+            _pg_fetchone_sync,
+            """SELECT COUNT(*) AS cnt FROM attempts
+               WHERE tenant_id = %s AND tg_id = %s AND lab_id = %s AND task_id = %s""",
+            (DEFAULT_TENANT_ID, tg_id, lab_id, task_id),
+        )
         used_attempts = int(count_row["cnt"]) if count_row else 0
-
         if amount > 0:
             granted_count = amount
             reason = "dashboard_add"
         else:
             granted_count = used_attempts
             reason = "dashboard_restore_all"
-
         if granted_count > 0:
-            await db.execute(
-                """INSERT INTO attempt_grants (tg_id, lab_id, task_id, amount, reason)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (tg_id, lab_id, task_id, granted_count, reason),
+            await asyncio.to_thread(
+                _pg_execute_sync,
+                """INSERT INTO attempt_grants (tenant_id, tg_id, lab_id, task_id, amount, reason)
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                (DEFAULT_TENANT_ID, tg_id, lab_id, task_id, granted_count, reason),
             )
-        await db.commit()
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+
+            async with db.execute(
+                "SELECT tg_id FROM users WHERE github_alias = ?", (github_alias,)
+            ) as cur:
+                row = await cur.fetchone()
+            if not row:
+                return HTMLResponse("<h1>Student not found</h1>", status_code=404)
+            tg_id = row["tg_id"]
+
+            async with db.execute(
+                "SELECT COUNT(*) AS cnt FROM attempts WHERE tg_id = ? AND lab_id = ? AND task_id = ?",
+                (tg_id, lab_id, task_id),
+            ) as cur:
+                count_row = await cur.fetchone()
+            used_attempts = int(count_row["cnt"]) if count_row else 0
+
+            if amount > 0:
+                granted_count = amount
+                reason = "dashboard_add"
+            else:
+                granted_count = used_attempts
+                reason = "dashboard_restore_all"
+
+            if granted_count > 0:
+                await db.execute(
+                    """INSERT INTO attempt_grants (tg_id, lab_id, task_id, amount, reason)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (tg_id, lab_id, task_id, granted_count, reason),
+                )
+            await db.commit()
 
     query = urlencode({
         "info": "attempts_reset",
@@ -662,16 +928,25 @@ async def student_mark_done(
     lab_id = lab_id.strip()
     task_id = task_id.strip()
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-
-        async with db.execute(
-            "SELECT tg_id FROM users WHERE github_alias = ?", (github_alias,)
-        ) as cur:
-            row = await cur.fetchone()
+    if USE_POSTGRES:
+        row = await asyncio.to_thread(
+            _pg_fetchone_sync,
+            "SELECT tg_id FROM users WHERE tenant_id = %s AND github_alias = %s",
+            (DEFAULT_TENANT_ID, github_alias),
+        )
         if not row:
             return HTMLResponse("<h1>Student not found</h1>", status_code=404)
         tg_id = row["tg_id"]
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT tg_id FROM users WHERE github_alias = ?", (github_alias,)
+            ) as cur:
+                row = await cur.fetchone()
+            if not row:
+                return HTMLResponse("<h1>Student not found</h1>", status_code=404)
+            tg_id = row["tg_id"]
 
         # Determine total checks from spec
         task_meta = load_task_metadata()
@@ -687,20 +962,28 @@ async def student_mark_done(
                     total = max(total, 1)
                 break
 
-        score = f"100.0% ({total}/{total})"
-        details = json.dumps([{
-            "id": "manual_override",
-            "status": "PASS",
-            "details": "Manually marked as done by instructor",
-            "description": "Manual override",
-        }])
-
-        await db.execute(
-            """INSERT INTO results (tg_id, lab_id, task_id, score, passed, failed, total, details)
-               VALUES (?, ?, ?, ?, ?, 0, ?, ?)""",
-            (tg_id, lab_id, task_id, score, total, total, details),
+    score = f"100.0% ({total}/{total})"
+    details = json.dumps([{
+        "id": "manual_override",
+        "status": "PASS",
+        "details": "Manually marked as done by instructor",
+        "description": "Manual override",
+    }])
+    if USE_POSTGRES:
+        await asyncio.to_thread(
+            _pg_execute_sync,
+            """INSERT INTO results (tenant_id, tg_id, lab_id, task_id, score, passed, failed, total, details)
+               VALUES (%s, %s, %s, %s, %s, %s, 0, %s, %s::jsonb)""",
+            (DEFAULT_TENANT_ID, tg_id, lab_id, task_id, score, total, total, details),
         )
-        await db.commit()
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """INSERT INTO results (tg_id, lab_id, task_id, score, passed, failed, total, details)
+                   VALUES (?, ?, ?, ?, ?, 0, ?, ?)""",
+                (tg_id, lab_id, task_id, score, total, total, details),
+            )
+            await db.commit()
 
     query = urlencode({"info": "marked_done", "lab": lab_id, "task": task_id})
     return RedirectResponse(f"/student/{github_alias}?{query}", status_code=302)
@@ -716,24 +999,41 @@ async def student_revert_done(
     lab_id = lab_id.strip()
     task_id = task_id.strip()
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-
-        async with db.execute(
-            "SELECT tg_id FROM users WHERE github_alias = ?", (github_alias,)
-        ) as cur:
-            row = await cur.fetchone()
+    if USE_POSTGRES:
+        row = await asyncio.to_thread(
+            _pg_fetchone_sync,
+            "SELECT tg_id FROM users WHERE tenant_id = %s AND github_alias = %s",
+            (DEFAULT_TENANT_ID, github_alias),
+        )
         if not row:
             return HTMLResponse("<h1>Student not found</h1>", status_code=404)
         tg_id = row["tg_id"]
-
-        await db.execute(
+        await asyncio.to_thread(
+            _pg_execute_sync,
             """DELETE FROM results
-               WHERE tg_id = ? AND lab_id = ? AND task_id = ?
-               AND details LIKE '%manual_override%'""",
-            (tg_id, lab_id, task_id),
+               WHERE tenant_id = %s AND tg_id = %s AND lab_id = %s AND task_id = %s
+               AND details::text LIKE '%%manual_override%%'""",
+            (DEFAULT_TENANT_ID, tg_id, lab_id, task_id),
         )
-        await db.commit()
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+
+            async with db.execute(
+                "SELECT tg_id FROM users WHERE github_alias = ?", (github_alias,)
+            ) as cur:
+                row = await cur.fetchone()
+            if not row:
+                return HTMLResponse("<h1>Student not found</h1>", status_code=404)
+            tg_id = row["tg_id"]
+
+            await db.execute(
+                """DELETE FROM results
+                   WHERE tg_id = ? AND lab_id = ? AND task_id = ?
+                   AND details LIKE '%manual_override%'""",
+                (tg_id, lab_id, task_id),
+            )
+            await db.commit()
 
     query = urlencode({"info": "reverted_done", "lab": lab_id, "task": task_id})
     return RedirectResponse(f"/student/{github_alias}?{query}", status_code=302)
@@ -747,17 +1047,26 @@ async def export_csv(lab: Optional[str] = Query(default=None)):
     active_lab = lab if lab in labs else (labs[-1] if labs else None)
     tasks = [t for t in task_meta if t["lab_id"] == active_lab] if active_lab else task_meta
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    if USE_POSTGRES:
+        students = await asyncio.to_thread(
+            _pg_fetchall_sync,
+            """SELECT tg_id, email, github_alias, student_group
+               FROM users WHERE tenant_id = %s ORDER BY github_alias""",
+            (DEFAULT_TENANT_ID,),
+        )
+        scores = await _fetch_best_scores_pg()
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
 
-        students = []
-        async with db.execute(
-            "SELECT tg_id, email, github_alias, student_group FROM users ORDER BY github_alias"
-        ) as cur:
-            async for row in cur:
-                students.append(dict(row))
+            students = []
+            async with db.execute(
+                "SELECT tg_id, email, github_alias, student_group FROM users ORDER BY github_alias"
+            ) as cur:
+                async for row in cur:
+                    students.append(dict(row))
 
-        scores = await _fetch_best_scores(db)
+            scores = await _fetch_best_scores(db)
 
     output = io.StringIO()
     writer = csv.writer(output)
@@ -811,8 +1120,8 @@ def _anonymize_student(tg_id: int, github_alias: str) -> str:
     return hashlib.sha256(data.encode()).hexdigest()[:8]
 
 
-async def _verify_basic_auth(request: Request) -> Optional[str]:
-    """Verify HTTP Basic Auth. Returns email on success, None on failure.
+async def _verify_basic_auth(request: Request) -> Optional[dict]:
+    """Verify HTTP Basic Auth. Returns user context on success, None on failure.
 
     Expected credentials: email as username, {github_username}{tg_alias} as password.
     """
@@ -825,45 +1134,208 @@ async def _verify_basic_auth(request: Request) -> Optional[str]:
     except Exception:
         return None
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT github_alias, tg_username FROM users WHERE email = ?", (email,)
-        ) as cur:
-            row = await cur.fetchone()
+    if USE_POSTGRES:
+        row = await asyncio.to_thread(
+            _pg_fetchone_sync,
+            "SELECT github_alias, tg_username, role, tenant_id FROM users WHERE email = %s",
+            (email,),
+        )
         if not row:
             return None
         expected = f"{row['github_alias']}{row['tg_username']}"
         if not hmac.compare_digest(password, expected):
             return None
-    return email
+        return {
+            "email": email,
+            "role": (row.get("role") or "student"),
+            "tenant_id": (row.get("tenant_id") or DEFAULT_TENANT_ID),
+        }
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT github_alias, tg_username, role, tenant_id FROM users WHERE email = ?", (email,)
+            ) as cur:
+                row = await cur.fetchone()
+            if not row:
+                return None
+            expected = f"{row['github_alias']}{row['tg_username']}"
+            if not hmac.compare_digest(password, expected):
+                return None
+            return {
+                "email": email,
+                "role": (row["role"] or "student"),
+                "tenant_id": (row["tenant_id"] or DEFAULT_TENANT_ID),
+            }
 
 
-async def _log_api_access(email: str, endpoint: str) -> None:
+def _forbidden() -> JSONResponse:
+    return JSONResponse({"error": "forbidden"}, status_code=403)
+
+
+def _is_teacher_role(role: str) -> bool:
+    return role in {"teacher", "university_admin", "superadmin"}
+
+
+def _resolve_scope_tenant(auth_ctx: dict, requested_tenant_id: Optional[str]) -> str:
+    """Return tenant scope for the request with superadmin override support."""
+    if auth_ctx["role"] == "superadmin" and requested_tenant_id:
+        return requested_tenant_id
+    return auth_ctx["tenant_id"]
+
+
+def _require_teacher_role(auth_ctx: dict) -> Optional[JSONResponse]:
+    if not _is_teacher_role(auth_ctx["role"]):
+        return _forbidden()
+    return None
+
+
+async def _log_api_access(email: str, endpoint: str, tenant_id: str) -> None:
     """Record an authenticated API call (fire-and-forget, never fails the request)."""
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "INSERT INTO api_access_log (email, endpoint) VALUES (?, ?)",
-                (email, endpoint),
+        if USE_POSTGRES:
+            await asyncio.to_thread(
+                _pg_execute_sync,
+                "INSERT INTO api_access_log (tenant_id, email, endpoint) VALUES (%s, %s, %s)",
+                (tenant_id, email, endpoint),
             )
-            await db.commit()
+        else:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "INSERT INTO api_access_log (tenant_id, email, endpoint) VALUES (?, ?, ?)",
+                    (tenant_id, email, endpoint),
+                )
+                await db.commit()
     except Exception:
         logger.warning("Failed to log API access for %s", email, exc_info=True)
+
+
+def _safe_json_loads(text: Any) -> list[dict]:
+    """Parse JSON list payload safely."""
+    if not text:
+        return []
+    if isinstance(text, list):
+        return text
+    if not isinstance(text, str):
+        return []
+    try:
+        data = json.loads(text)
+        return data if isinstance(data, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def _is_pass_status(check: dict) -> bool:
+    """Return True when a check is in PASS status."""
+    return str(check.get("status", "")).upper() == "PASS"
+
+
+def _extract_common_failure_keys(check: dict) -> list[str]:
+    """Build compact keys for failure clustering."""
+    if _is_pass_status(check):
+        return []
+    check_id = str(check.get("id", "")).strip() or "unknown_check"
+    diagnostic = check.get("diagnostic") if isinstance(check.get("diagnostic"), dict) else {}
+    taxonomy = str(
+        diagnostic.get("failure_taxonomy")
+        or check.get("failure_taxonomy")
+        or ""
+    ).strip()
+    if taxonomy:
+        return [f"{check_id} :: taxonomy:{taxonomy}"]
+    short_reason = str(check.get("short_reason", "")).strip()
+    likely_cause = str(check.get("likely_cause", "")).strip()
+    base = likely_cause or short_reason or str(check.get("details", "")).strip()[:140] or "unspecified failure"
+    return [f"{check_id} :: {base}"]
+
+
+def _taxonomy_suggestion(pattern: str) -> str:
+    """Return an intervention suggestion for a taxonomy-based failure pattern."""
+    if "taxonomy:missing_resource" in pattern:
+        return "Show required file/path checklist and verify names/casing before re-run."
+    if "taxonomy:timeout" in pattern:
+        return "Ask student to collect service startup logs and validate runtime health before check."
+    if "taxonomy:permission_access" in pattern:
+        return "Review auth/permissions setup with a minimal reproducible access test."
+    if "taxonomy:connectivity" in pattern:
+        return "Validate VM/network reachability first, then retry a single focused check."
+    if "taxonomy:runtime_error" in pattern:
+        return "Inspect traceback root cause and apply one targeted fix before full re-run."
+    if "taxonomy:requirement_mismatch" in pattern:
+        return "Compare solution against rubric line-by-line and fix the first failing requirement."
+    return "Prepare a short targeted clarification and one reproducible fix example."
+
+
+def _extract_taxonomy_from_pattern(pattern: str) -> str:
+    """Extract taxonomy token from normalized failure pattern."""
+    marker = "taxonomy:"
+    if marker not in pattern:
+        return "unclassified"
+    return pattern.split(marker, 1)[1].strip() or "unclassified"
+
+
+async def _load_latest_results_rows(
+    db: Optional[aiosqlite.Connection] = None,
+    tenant_id: str = DEFAULT_TENANT_ID,
+    lab_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+) -> list[dict]:
+    """Load latest result per (student, lab, task), optionally filtered."""
+    query = """
+        SELECT r.tg_id, u.github_alias, u.student_group, r.lab_id, r.task_id,
+               r.score, r.passed, r.failed, r.total, r.details, r.timestamp
+        FROM results r
+        JOIN users u ON u.tg_id = r.tg_id
+    """
+    clauses = []
+    params: list[Any] = []
+    tenant_clause_r = "r.tenant_id = %s" if USE_POSTGRES else "r.tenant_id = ?"
+    tenant_clause_u = "u.tenant_id = %s" if USE_POSTGRES else "u.tenant_id = ?"
+    clauses.append(tenant_clause_r)
+    params.append(tenant_id)
+    clauses.append(tenant_clause_u)
+    params.append(tenant_id)
+    if lab_id:
+        clauses.append("r.lab_id = %s" if USE_POSTGRES else "r.lab_id = ?")
+        params.append(lab_id)
+    if task_id:
+        clauses.append("r.task_id = %s" if USE_POSTGRES else "r.task_id = ?")
+        params.append(task_id)
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY r.timestamp DESC"
+
+    latest: dict[tuple[int, str, str], dict] = {}
+    if USE_POSTGRES:
+        rows = await asyncio.to_thread(_pg_fetchall_sync, query, tuple(params))
+        for row_d in rows:
+            key = (row_d["tg_id"], row_d["lab_id"], row_d["task_id"])
+            if key not in latest:
+                latest[key] = row_d
+    else:
+        if db is None:
+            raise RuntimeError("SQLite connection is required when PostgreSQL is disabled.")
+        async with db.execute(query, tuple(params)) as cur:
+            async for row in cur:
+                row_d = dict(row)
+                key = (row_d["tg_id"], row_d["lab_id"], row_d["task_id"])
+                if key not in latest:
+                    latest[key] = row_d
+    return list(latest.values())
 
 
 @app.get("/api/items")
 async def api_items(request: Request):
     """Return the lab/task catalog derived from autochecker specs."""
-    email = await _verify_basic_auth(request)
-    if not email:
+    auth_ctx = await _verify_basic_auth(request)
+    if not auth_ctx:
         return JSONResponse(
             {"error": "unauthorized"},
             status_code=401,
             headers={"WWW-Authenticate": "Basic realm=\"autochecker\""},
         )
 
-    await _log_api_access(email, "/api/items")
+    await _log_api_access(auth_ctx["email"], "/api/items", auth_ctx["tenant_id"])
 
     task_meta = load_task_metadata()
     items = []
@@ -890,98 +1362,189 @@ async def api_items(request: Request):
 @app.get("/api/logs")
 async def api_logs(
     request: Request,
+    tenant_id: Optional[str] = Query(default=None),
     since: Optional[str] = Query(default=None),
     limit: int = Query(default=500, ge=1, le=5000),
 ):
     """Return anonymized check results for ETL consumption."""
-    email = await _verify_basic_auth(request)
-    if not email:
+    auth_ctx = await _verify_basic_auth(request)
+    if not auth_ctx:
         return JSONResponse(
             {"error": "unauthorized"},
             status_code=401,
             headers={"WWW-Authenticate": "Basic realm=\"autochecker\""},
         )
 
-    await _log_api_access(email, "/api/logs")
+    role_err = _require_teacher_role(auth_ctx)
+    if role_err:
+        return role_err
+    scope_tenant = _resolve_scope_tenant(auth_ctx, tenant_id)
+    await _log_api_access(auth_ctx["email"], "/api/logs", scope_tenant)
 
     email_groups = _load_allowed_email_groups()
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    logs = []
+    if USE_POSTGRES:
+        user_rows = await asyncio.to_thread(
+            _pg_fetchall_sync,
+            "SELECT tg_id, github_alias, email, student_group FROM users WHERE tenant_id = %s",
+                (scope_tenant,),
+        )
+        anon_map: dict[int, tuple[str, str]] = {}
+        for row in user_rows:
+            group = (row["student_group"] or "").strip()
+            if not group:
+                group = email_groups.get((row["email"] or "").strip().lower(), "")
+            if not group:
+                group = "unknown"
+            anon_map[row["tg_id"]] = (
+                _anonymize_student(row["tg_id"], row["github_alias"]),
+                group,
+            )
 
-        # Build student anonymization map
-        anon_map: dict[int, tuple[str, str]] = {}  # tg_id -> (anon_id, group)
-        async with db.execute(
-            "SELECT tg_id, github_alias, email, student_group FROM users"
-        ) as cur:
-            async for row in cur:
-                group = (row["student_group"] or "").strip()
-                if not group:
-                    group = email_groups.get((row["email"] or "").strip().lower(), "")
-                if not group:
-                    group = "unknown"
-                anon_map[row["tg_id"]] = (
-                    _anonymize_student(row["tg_id"], row["github_alias"]),
-                    group,
-                )
-
-        # Fetch results with optional since filter
         if since:
-            query = """
+            result_rows = await asyncio.to_thread(
+                _pg_fetchall_sync,
+                """
                 SELECT id, tg_id, lab_id, task_id, score, passed, failed, total, details, timestamp
-                FROM results WHERE timestamp > ? ORDER BY timestamp ASC LIMIT ?
-            """
-            params = (since, limit + 1)
+                FROM results
+                WHERE tenant_id = %s AND timestamp > %s::timestamptz
+                ORDER BY timestamp ASC
+                LIMIT %s
+                """,
+                (scope_tenant, since, limit + 1),
+            )
         else:
-            query = """
+            result_rows = await asyncio.to_thread(
+                _pg_fetchall_sync,
+                """
                 SELECT id, tg_id, lab_id, task_id, score, passed, failed, total, details, timestamp
-                FROM results ORDER BY timestamp ASC LIMIT ?
-            """
-            params = (limit + 1,)
+                FROM results
+                WHERE tenant_id = %s
+                ORDER BY timestamp ASC
+                LIMIT %s
+                """,
+                (scope_tenant, limit + 1),
+            )
 
-        logs = []
-        async with db.execute(query, params) as cur:
-            async for row in cur:
-                tg_id = row["tg_id"]
-                anon = anon_map.get(tg_id)
-                if not anon:
-                    continue
+        for row in result_rows:
+            tg_id = row["tg_id"]
+            anon = anon_map.get(tg_id)
+            if not anon:
+                continue
+            score_val = None
+            if row["score"]:
+                try:
+                    score_val = float(str(row["score"]).rstrip("%"))
+                except (ValueError, AttributeError):
+                    pass
+            checks = []
+            raw_details = row.get("details")
+            try:
+                if isinstance(raw_details, str):
+                    raw_checks = json.loads(raw_details)
+                elif isinstance(raw_details, list):
+                    raw_checks = raw_details
+                else:
+                    raw_checks = []
+                for c in raw_checks:
+                    checks.append({
+                        "check_id": c.get("id", ""),
+                        "title": c.get("title", ""),
+                        "passed": bool(c.get("passed", False)),
+                    })
+            except (json.JSONDecodeError, TypeError):
+                pass
+            logs.append({
+                "id": row["id"],
+                "student_id": anon[0],
+                "group": anon[1],
+                "lab": row["lab_id"],
+                "task": row["task_id"],
+                "score": score_val,
+                "passed": row["passed"],
+                "failed": row["failed"],
+                "total": row["total"],
+                "checks": checks,
+                "submitted_at": row["timestamp"],
+            })
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
 
-                # Parse score from "75%" string to 75.0
-                score_val = None
-                if row["score"]:
-                    try:
-                        score_val = float(row["score"].rstrip("%"))
-                    except (ValueError, AttributeError):
-                        pass
+            # Build student anonymization map
+            anon_map: dict[int, tuple[str, str]] = {}  # tg_id -> (anon_id, group)
+            async with db.execute(
+                "SELECT tg_id, github_alias, email, student_group FROM users WHERE tenant_id = ?",
+                (scope_tenant,),
+            ) as cur:
+                async for row in cur:
+                    group = (row["student_group"] or "").strip()
+                    if not group:
+                        group = email_groups.get((row["email"] or "").strip().lower(), "")
+                    if not group:
+                        group = "unknown"
+                    anon_map[row["tg_id"]] = (
+                        _anonymize_student(row["tg_id"], row["github_alias"]),
+                        group,
+                    )
 
-                # Parse check details (drop error messages, keep id/title/passed)
-                checks = []
-                if row["details"]:
-                    try:
-                        raw_checks = json.loads(row["details"])
-                        for c in raw_checks:
-                            checks.append({
-                                "check_id": c.get("id", ""),
-                                "title": c.get("title", ""),
-                                "passed": bool(c.get("passed", False)),
-                            })
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+            # Fetch results with optional since filter
+            if since:
+                query = """
+                    SELECT id, tg_id, lab_id, task_id, score, passed, failed, total, details, timestamp
+                    FROM results WHERE tenant_id = ? AND timestamp > ? ORDER BY timestamp ASC LIMIT ?
+                """
+                params = (scope_tenant, since, limit + 1)
+            else:
+                query = """
+                    SELECT id, tg_id, lab_id, task_id, score, passed, failed, total, details, timestamp
+                    FROM results WHERE tenant_id = ? ORDER BY timestamp ASC LIMIT ?
+                """
+                params = (scope_tenant, limit + 1)
 
-                logs.append({
-                    "id": row["id"],
-                    "student_id": anon[0],
-                    "group": anon[1],
-                    "lab": row["lab_id"],
-                    "task": row["task_id"],
-                    "score": score_val,
-                    "passed": row["passed"],
-                    "failed": row["failed"],
-                    "total": row["total"],
-                    "checks": checks,
-                    "submitted_at": row["timestamp"],
-                })
+            async with db.execute(query, params) as cur:
+                async for row in cur:
+                    tg_id = row["tg_id"]
+                    anon = anon_map.get(tg_id)
+                    if not anon:
+                        continue
+
+                    # Parse score from "75%" string to 75.0
+                    score_val = None
+                    if row["score"]:
+                        try:
+                            score_val = float(row["score"].rstrip("%"))
+                        except (ValueError, AttributeError):
+                            pass
+
+                    # Parse check details (drop error messages, keep id/title/passed)
+                    checks = []
+                    if row["details"]:
+                        try:
+                            raw_checks = json.loads(row["details"])
+                            for c in raw_checks:
+                                checks.append({
+                                    "check_id": c.get("id", ""),
+                                    "title": c.get("title", ""),
+                                    "passed": bool(c.get("passed", False)),
+                                })
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+
+                    logs.append({
+                        "id": row["id"],
+                        "student_id": anon[0],
+                        "group": anon[1],
+                        "lab": row["lab_id"],
+                        "task": row["task_id"],
+                        "score": score_val,
+                        "passed": row["passed"],
+                        "failed": row["failed"],
+                        "total": row["total"],
+                        "checks": checks,
+                        "submitted_at": row["timestamp"],
+                    })
 
     has_more = len(logs) > limit
     if has_more:
@@ -1004,34 +1567,258 @@ async def api_access_log(request: Request, github_alias: str):
     if not RELAY_TOKEN or not hmac.compare_digest(auth, f"Bearer {RELAY_TOKEN}"):
         return JSONResponse({"error": "unauthorized"}, status_code=403)
 
-    # Look up email by github_alias
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT email FROM users WHERE github_alias = ?", (github_alias,)
-        ) as cur:
-            row = await cur.fetchone()
+    if USE_POSTGRES:
+        row = await asyncio.to_thread(
+            _pg_fetchone_sync,
+            "SELECT email FROM users WHERE tenant_id = %s AND github_alias = %s",
+            (DEFAULT_TENANT_ID, github_alias),
+        )
         if not row:
             return JSONResponse({"error": "user not found"}, status_code=404)
-
         email = row["email"]
-
-        # Get access summary
-        async with db.execute(
+        entries = await asyncio.to_thread(
+            _pg_fetchall_sync,
             """
             SELECT endpoint, COUNT(*) as call_count,
                    MIN(timestamp) as first_call, MAX(timestamp) as last_call
             FROM api_access_log
-            WHERE email = ?
+            WHERE tenant_id = %s AND email = %s
             GROUP BY endpoint
             """,
-            (email,),
-        ) as cur:
-            entries = [dict(r) async for r in cur]
+            (DEFAULT_TENANT_ID, email),
+        )
+    else:
+        # Look up email by github_alias
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT email FROM users WHERE tenant_id = ? AND github_alias = ?",
+                (DEFAULT_TENANT_ID, github_alias),
+            ) as cur:
+                row = await cur.fetchone()
+            if not row:
+                return JSONResponse({"error": "user not found"}, status_code=404)
+
+            email = row["email"]
+
+            # Get access summary
+            async with db.execute(
+                """
+                SELECT endpoint, COUNT(*) as call_count,
+                       MIN(timestamp) as first_call, MAX(timestamp) as last_call
+                FROM api_access_log
+                WHERE tenant_id = ? AND email = ?
+                GROUP BY endpoint
+                """,
+                (DEFAULT_TENANT_ID, email),
+            ) as cur:
+                entries = [dict(r) async for r in cur]
 
     return JSONResponse({
         "github_alias": github_alias,
         "endpoints": entries,
+    })
+
+
+@app.get("/api/teacher/summary/student/{github_alias}")
+async def api_teacher_summary_student(
+    request: Request,
+    github_alias: str,
+    tenant_id: Optional[str] = Query(default=None),
+):
+    """Teacher-assistant summary for one student."""
+    auth_ctx = await _verify_basic_auth(request)
+    if not auth_ctx:
+        return JSONResponse(
+            {"error": "unauthorized"},
+            status_code=401,
+            headers={"WWW-Authenticate": "Basic realm=\"autochecker\""},
+        )
+    role_err = _require_teacher_role(auth_ctx)
+    if role_err:
+        return role_err
+    scope_tenant = _resolve_scope_tenant(auth_ctx, tenant_id)
+    await _log_api_access(auth_ctx["email"], f"/api/teacher/summary/student/{github_alias}", scope_tenant)
+
+    if USE_POSTGRES:
+        rows = await _load_latest_results_rows(None, tenant_id=scope_tenant)
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            rows = await _load_latest_results_rows(db, tenant_id=scope_tenant)
+    student_rows = [r for r in rows if r["github_alias"] == github_alias]
+    if not student_rows:
+        return JSONResponse({"error": "student not found"}, status_code=404)
+
+    tasks: list[dict] = []
+    fail_counter: Counter[str] = Counter()
+    pass_count = 0
+    for row in student_rows:
+        checks = _safe_json_loads(row.get("details"))
+        for c in checks:
+            for key in _extract_common_failure_keys(c):
+                fail_counter[key] += 1
+        task_pass = _cell_status(row.get("passed"), row.get("failed"), row.get("total")) in ("pass", "partial")
+        if task_pass:
+            pass_count += 1
+        tasks.append({
+            "lab_id": row["lab_id"],
+            "task_id": row["task_id"],
+            "score": row.get("score"),
+            "status": "pass" if task_pass else "needs_attention",
+            "timestamp": row.get("timestamp"),
+        })
+
+    completion_rate = round((pass_count / len(student_rows) * 100), 1) if student_rows else 0.0
+    top_failures = [{"pattern": k, "count": v} for k, v in fail_counter.most_common(5)]
+    taxonomy_counter: Counter[str] = Counter()
+    for item in top_failures:
+        taxonomy_counter[_extract_taxonomy_from_pattern(item["pattern"])] += int(item["count"])
+    suggestions = [_taxonomy_suggestion(item["pattern"]) for item in top_failures[:3]]
+    if not suggestions:
+        suggestions = [
+            "Focus on the most frequent failure pattern first.",
+            "Ask the student to submit logs/evidence for the failed step.",
+            "Re-run one task after a targeted fix to validate progress.",
+        ]
+
+    return JSONResponse({
+        "student": github_alias,
+        "tenant_id": scope_tenant,
+        "completion_rate": completion_rate,
+        "tasks": tasks,
+        "common_failures": top_failures,
+        "failure_taxonomy_breakdown": dict(taxonomy_counter),
+        "intervention_suggestions": suggestions,
+    })
+
+
+@app.get("/api/teacher/summary/task")
+async def api_teacher_summary_task(
+    request: Request,
+    tenant_id: Optional[str] = Query(default=None),
+    lab_id: str = Query(...),
+    task_id: str = Query(...),
+):
+    """Teacher-assistant summary for a specific task."""
+    auth_ctx = await _verify_basic_auth(request)
+    if not auth_ctx:
+        return JSONResponse(
+            {"error": "unauthorized"},
+            status_code=401,
+            headers={"WWW-Authenticate": "Basic realm=\"autochecker\""},
+        )
+    role_err = _require_teacher_role(auth_ctx)
+    if role_err:
+        return role_err
+    scope_tenant = _resolve_scope_tenant(auth_ctx, tenant_id)
+    await _log_api_access(auth_ctx["email"], f"/api/teacher/summary/task?lab_id={lab_id}&task_id={task_id}", scope_tenant)
+
+    if USE_POSTGRES:
+        rows = await _load_latest_results_rows(None, tenant_id=scope_tenant, lab_id=lab_id, task_id=task_id)
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            rows = await _load_latest_results_rows(db, tenant_id=scope_tenant, lab_id=lab_id, task_id=task_id)
+
+    total_students = len(rows)
+    pass_students = 0
+    fail_counter: Counter[str] = Counter()
+    escalation_counter: Counter[str] = Counter()
+    for row in rows:
+        if _cell_status(row.get("passed"), row.get("failed"), row.get("total")) in ("pass", "partial"):
+            pass_students += 1
+        for c in _safe_json_loads(row.get("details")):
+            esc_state = str(c.get("escalation_state", "none"))
+            escalation_counter[esc_state] += 1
+            for key in _extract_common_failure_keys(c):
+                fail_counter[key] += 1
+
+    pass_rate = round((pass_students / total_students * 100), 1) if total_students else 0.0
+    top_failures = [{"pattern": k, "count": v} for k, v in fail_counter.most_common(10)]
+    taxonomy_counter: Counter[str] = Counter()
+    for item in top_failures:
+        taxonomy_counter[_extract_taxonomy_from_pattern(item["pattern"])] += int(item["count"])
+    return JSONResponse({
+        "lab_id": lab_id,
+        "task_id": task_id,
+        "tenant_id": scope_tenant,
+        "students_total": total_students,
+        "students_passed": pass_students,
+        "pass_rate": pass_rate,
+        "common_failures": top_failures,
+        "failure_taxonomy_breakdown": dict(taxonomy_counter),
+        "escalation_states": dict(escalation_counter),
+        "intervention_suggestions": [_taxonomy_suggestion(item["pattern"]) for item in top_failures[:5]],
+    })
+
+
+@app.get("/api/teacher/summary/cohort")
+async def api_teacher_summary_cohort(
+    request: Request,
+    tenant_id: Optional[str] = Query(default=None),
+    lab_id: Optional[str] = Query(default=None),
+):
+    """Teacher-assistant cohort summary with clustering by failure pattern."""
+    auth_ctx = await _verify_basic_auth(request)
+    if not auth_ctx:
+        return JSONResponse(
+            {"error": "unauthorized"},
+            status_code=401,
+            headers={"WWW-Authenticate": "Basic realm=\"autochecker\""},
+        )
+    role_err = _require_teacher_role(auth_ctx)
+    if role_err:
+        return role_err
+    scope_tenant = _resolve_scope_tenant(auth_ctx, tenant_id)
+    await _log_api_access(auth_ctx["email"], f"/api/teacher/summary/cohort?lab_id={lab_id or ''}", scope_tenant)
+
+    if USE_POSTGRES:
+        rows = await _load_latest_results_rows(None, tenant_id=scope_tenant, lab_id=lab_id)
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            rows = await _load_latest_results_rows(db, tenant_id=scope_tenant, lab_id=lab_id)
+
+    by_group: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        by_group[(row.get("student_group") or "unknown").strip() or "unknown"].append(row)
+
+    group_summaries: list[dict] = []
+    cohort_failures: Counter[str] = Counter()
+    for group, group_rows in sorted(by_group.items()):
+        passed = 0
+        for row in group_rows:
+            if _cell_status(row.get("passed"), row.get("failed"), row.get("total")) in ("pass", "partial"):
+                passed += 1
+            for c in _safe_json_loads(row.get("details")):
+                for key in _extract_common_failure_keys(c):
+                    cohort_failures[key] += 1
+        pass_rate = round((passed / len(group_rows) * 100), 1) if group_rows else 0.0
+        group_summaries.append({
+            "group": group,
+            "results_count": len(group_rows),
+            "pass_rate": pass_rate,
+        })
+
+    interventions = []
+    for pattern, count in cohort_failures.most_common(5):
+        interventions.append({
+            "pattern": pattern,
+            "count": count,
+            "suggestion": _taxonomy_suggestion(pattern),
+        })
+    taxonomy_counter: Counter[str] = Counter()
+    for pattern, count in cohort_failures.items():
+        taxonomy_counter[_extract_taxonomy_from_pattern(pattern)] += int(count)
+
+    return JSONResponse({
+        "tenant_id": scope_tenant,
+        "lab_id": lab_id or "all",
+        "groups": group_summaries,
+        "common_failures": [{"pattern": k, "count": v} for k, v in cohort_failures.most_common(15)],
+        "failure_taxonomy_breakdown": dict(taxonomy_counter),
+        "interventions": interventions,
     })
 
 
@@ -1221,15 +2008,15 @@ async def api_eval_question(
     index: int = Query(..., ge=0, description="Question index"),
 ):
     """Serve a single eval question by index. Used by run_eval.py for local testing."""
-    email = await _verify_basic_auth(request)
-    if not email:
+    auth_ctx = await _verify_basic_auth(request)
+    if not auth_ctx:
         return JSONResponse(
             {"error": "unauthorized"},
             status_code=401,
             headers={"WWW-Authenticate": "Basic realm=\"autochecker\""},
         )
 
-    await _log_api_access(email, f"/api/eval/question?lab={lab}&index={index}")
+    await _log_api_access(auth_ctx["email"], f"/api/eval/question?lab={lab}&index={index}", auth_ctx["tenant_id"])
 
     questions = _load_eval_questions(lab)
     if not questions:

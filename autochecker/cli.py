@@ -64,18 +64,6 @@ LAB_CONFIG = {
         "spec": "specs/lab-08.yaml",
         "ready": True,
     },
-    "lab-09": {
-        "name": "Lab 09 – (Coming soon)",
-        "repo_suffix": "lab-09-tbd",
-        "spec": "specs/lab-09.yaml",
-        "ready": False,
-    },
-    "lab-10": {
-        "name": "Lab 10 – (Coming soon)",
-        "repo_suffix": "lab-10-tbd",
-        "spec": "specs/lab-10.yaml",
-        "ready": False,
-    },
 }
 
 
@@ -120,7 +108,7 @@ def select_lab() -> dict:
 
         if not config["ready"]:
             print(f"  {config['name']} is not ready yet!")
-            print("   Only Lab 01 is available for now.")
+            print(f"   Available ready labs: {', '.join([k for k, v in LAB_CONFIG.items() if v['ready']])}")
             return "lab-01", LAB_CONFIG["lab-01"]
 
         return lab_id, config
@@ -146,9 +134,9 @@ def check(
     Check a single student.
 
     Examples:
-      python main.py check -s Nurassyl28 -l lab-01 -p github
-      python main.py check -s Nurassyl28 -l lab-01 -t task-1 -p github
-      python main.py check  # interactive mode
+      uv run python main.py check -s Nurassyl28 -l lab-01 -p github
+      uv run python main.py check -s Nurassyl28 -l lab-01 -t task-1 -p github
+      uv run python main.py check  # interactive mode
     """
     # Check token
     if not token:
@@ -171,9 +159,9 @@ def check(
     if student and (student.endswith(".csv") or student.endswith(".txt") or student.endswith(".json")):
         print(f"\nERROR: You specified a file '{student}' instead of a student name!")
         print(f"\nTo check a single student use:")
-        print(f"   python3 main.py check -s StudentName -l lab-01 -p github")
+        print(f"   uv run python main.py check -s StudentName -l lab-01 -p github")
         print(f"\nTo check all students from a file use the 'batch' command:")
-        print(f"   python3 main.py batch -s {student} -l lab-01 -p github")
+        print(f"   uv run python main.py batch -s {student} -l lab-01 -p github")
         raise typer.Exit(code=1)
 
     if not student:
@@ -256,9 +244,9 @@ def batch(
     Batch student check (up to 300+ students).
 
     Examples:
-      python main.py batch -s students.csv -l lab-01 -p github
-      python main.py batch -s students.csv -l lab-01 -p gitlab --gitlab-url https://gitlab.astanait.edu.kz
-      python main.py batch -s students.csv -l lab-03 --template-repo inno-se-toolkit/se-toolkit-lab-3
+      uv run python main.py batch -s students.csv -l lab-01 -p github
+      uv run python main.py batch -s students.csv -l lab-01 -p gitlab --gitlab-url https://gitlab.astanait.edu.kz
+      uv run python main.py batch -s students.csv -l lab-03 --template-repo inno-se-toolkit/se-toolkit-lab-3
     """
     # Check token
     if not token:
@@ -346,6 +334,6 @@ def labs():
 
     print("\n" + "=" * 60)
     print("Usage:")
-    print("   python main.py check -s StudentName -l lab-01")
-    print("   python main.py batch -s students.csv -l lab-01")
+    print("   uv run python main.py check -s StudentName -l lab-01")
+    print("   uv run python main.py batch -s students.csv -l lab-01")
     print("=" * 60 + "\n")

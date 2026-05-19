@@ -55,6 +55,11 @@ The platform should remain:
 - operationally reliable
 - compatible with repo-based labs
 - extensible for future tracks and assignment styles
+- tenant-aware for multi-university operation
+
+Current direction:
+- keep `spec_mode` for existing labs
+- add `llm_mode` for universities that do not use YAML specs
 
 ## Product Requirements
 
@@ -104,6 +109,7 @@ The system should support a simpler learning path for less technical learners:
 - Keep relay and VM constraints in mind.
 - Preserve existing CLI, bot, and dashboard entry points.
 - Changes must be production-oriented, not prototype-only.
+- Database evolution should support multi-tenant RBAC (`tenant_id`, role scopes).
 
 ## Major Workstreams
 

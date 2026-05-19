@@ -18,6 +18,8 @@ if not BOT_TOKEN:
 
 # Database configuration
 DB_PATH = os.getenv("DB_PATH", "bot.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+DEFAULT_TENANT_ID = os.getenv("DEFAULT_TENANT_ID", "default").strip() or "default"
 
 # Project paths — resolved from monorepo root
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -176,3 +178,32 @@ def get_tasks_needing_vm_username(lab_id: str) -> set[str]:
         if params.get("username") == "__vm_username__":
             task_ids.add(check["task"])
     return task_ids
+
+
+def get_task_escalation_thresholds(lab_id: str, task_id: str) -> dict[str, int]:
+    """Return escalation thresholds by check_id for a given task.
+
+    Includes only checks where escalation is enabled and
+    ``after_failed_attempts`` is a positive integer.
+    """
+    spec_path = SPECS_DIR / f"{lab_id}.yaml"
+    if not spec_path.exists():
+        return {}
+
+    with open(spec_path, "r", encoding="utf-8") as f:
+        spec = yaml.safe_load(f)
+
+    thresholds: dict[str, int] = {}
+    for check in spec.get("checks", []):
+        if check.get("task") != task_id:
+            continue
+
+        escalation = check.get("escalation") or {}
+        if not escalation.get("enabled"):
+            continue
+
+        threshold = escalation.get("after_failed_attempts")
+        if isinstance(threshold, int) and threshold >= 1:
+            thresholds[check.get("id", "")] = threshold
+
+    return thresholds

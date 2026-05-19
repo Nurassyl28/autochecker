@@ -3,6 +3,50 @@ from typing import Any, Dict, List, Optional, Literal
 from pydantic import BaseModel, Field
 import yaml
 
+
+CheckStatus = Literal["PASS", "FAIL", "ERROR"]
+EscalationState = Literal["none", "eligible", "triggered", "completed"]
+
+
+class TutoringSpec(BaseModel):
+    """Student-facing tutoring metadata for a check."""
+    short_reason_template: Optional[str] = Field(default=None)
+    detailed_reason_template: Optional[str] = Field(default=None)
+    likely_cause_template: Optional[str] = Field(default=None)
+    next_steps: List[str] = Field(default_factory=list)
+
+
+class EscalationSpec(BaseModel):
+    """Escalation policy for a check."""
+    enabled: bool = Field(default=False)
+    after_failed_attempts: Optional[int] = Field(default=None, ge=1)
+    strategy: Optional[str] = Field(default=None)
+    params: Dict[str, Any] = Field(default_factory=dict)
+
+
+class TeacherSummarySpec(BaseModel):
+    """Metadata used to group and summarize outcomes for instructors."""
+    category: Optional[str] = Field(default=None)
+    tags: List[str] = Field(default_factory=list)
+    summary_template: Optional[str] = Field(default=None)
+    intervention_hints: List[str] = Field(default_factory=list)
+
+
+class StructuredFeedback(BaseModel):
+    """Normalized feedback contract for all checks."""
+    status: CheckStatus
+    short_reason: str = Field(default="")
+    detailed_reason: str = Field(default="")
+    likely_cause: str = Field(default="")
+    next_steps: List[str] = Field(default_factory=list)
+    # v1 aliases for student tutor mode payload consistency
+    what_failed: str = Field(default="")
+    why_failed: str = Field(default="")
+    what_to_do_next: List[str] = Field(default_factory=list)
+    hint: str = Field(default="")
+    escalation_state: EscalationState = Field(default="none")
+
+
 class CheckSpec(BaseModel):
     """Specification for a single check in YAML."""
     id: str
@@ -18,6 +62,8 @@ class CheckSpec(BaseModel):
     is_required: bool = Field(default=True)  # Check is required (new format)
     weight: float = Field(default=1.0)  # Check weight for weighted scoring (optional)
     depends_on: List[str] = Field(default_factory=list)  # Dependencies on other checks
+    tutoring: Optional[TutoringSpec] = Field(default=None)
+    escalation: Optional[EscalationSpec] = Field(default=None)
 
     class Config:
         populate_by_name = True  # Allows using alias "class" for check_class
@@ -48,6 +94,8 @@ class LabSpec(BaseModel):
     id: str
     repo_name: Optional[str] = Field(default=None)
     title: Optional[str] = Field(default="")  # Lab title (optional)
+    learning_objectives: List[str] = Field(default_factory=list)
+    teacher_summary: Optional[TeacherSummarySpec] = Field(default=None)
     tasks: List[TaskMeta] = Field(default_factory=list)  # Task group metadata
     checks: List[CheckSpec]
     # Plagiarism config for this lab

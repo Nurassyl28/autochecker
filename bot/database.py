@@ -1,16 +1,46 @@
 """Database module for SQLite operations."""
 
 import logging
+import asyncio
 from pathlib import Path
 
 import aiosqlite
 from datetime import datetime
 from typing import Optional
 from dataclasses import dataclass
+import psycopg
+from psycopg.rows import dict_row
 
-from .config import DB_PATH, get_max_attempts
+from .config import DB_PATH, DATABASE_URL, DEFAULT_TENANT_ID, get_max_attempts
 
 logger = logging.getLogger(__name__)
+USE_POSTGRES = bool(DATABASE_URL)
+
+
+def _to_pg_query(sql: str) -> str:
+    """Convert sqlite-style placeholders to psycopg style."""
+    return sql.replace("?", "%s")
+
+
+def _pg_fetchone_sync(sql: str, params: tuple = ()) -> Optional[dict]:
+    with psycopg.connect(DATABASE_URL, row_factory=dict_row, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(_to_pg_query(sql), params)
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def _pg_fetchall_sync(sql: str, params: tuple = ()) -> list[dict]:
+    with psycopg.connect(DATABASE_URL, row_factory=dict_row, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(_to_pg_query(sql), params)
+            return [dict(r) for r in cur.fetchall()]
+
+
+def _pg_execute_sync(sql: str, params: tuple = ()) -> None:
+    with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(_to_pg_query(sql), params)
 
 
 @dataclass
@@ -21,6 +51,8 @@ class User:
     github_alias: str
     tg_username: str
     is_admin: bool
+    role: str = "student"
+    tenant_id: str = DEFAULT_TENANT_ID
 
 
 # ---------------------------------------------------------------------------
@@ -28,7 +60,7 @@ class User:
 #   0 — legacy (users: tg_id, student_name, github_nick, is_admin)
 #   1 — self-registration + results table
 # ---------------------------------------------------------------------------
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 async def _get_table_columns(db: aiosqlite.Connection, table: str) -> set[str]:
@@ -65,6 +97,12 @@ async def _set_schema_version(db: aiosqlite.Connection, version: int) -> None:
 
 async def init_db() -> None:
     """Initialize or migrate the database to the latest schema."""
+    if USE_POSTGRES:
+        logger.info(
+            "DATABASE_URL is set: skipping SQLite init_db(). "
+            "Initialize PostgreSQL using scripts/init_postgres.py."
+        )
+        return
     async with aiosqlite.connect(DB_PATH) as db:
         version = await _get_schema_version(db)
         logger.info("Current DB schema version: %d (target: %d)", version, SCHEMA_VERSION)
@@ -85,6 +123,8 @@ async def init_db() -> None:
             await _migrate_to_v7(db)
         if version < 8:
             await _migrate_to_v8(db)
+        if version < 9:
+            await _migrate_to_v9(db)
 
         await _set_schema_version(db, SCHEMA_VERSION)
         await db.commit()
@@ -272,8 +312,47 @@ async def _migrate_to_v8(db: aiosqlite.Connection) -> None:
     logger.info("Migration to v8 complete")
 
 
+async def _migrate_to_v9(db: aiosqlite.Connection) -> None:
+    """Add multi-tenant and RBAC columns."""
+    user_cols = await _get_table_columns(db, "users")
+    if "tenant_id" not in user_cols:
+        logger.info("Migration v9: adding tenant_id to users")
+        await db.execute("ALTER TABLE users ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
+    if "role" not in user_cols:
+        logger.info("Migration v9: adding role to users")
+        await db.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'student'")
+
+    results_cols = await _get_table_columns(db, "results")
+    if "tenant_id" not in results_cols:
+        logger.info("Migration v9: adding tenant_id to results")
+        await db.execute("ALTER TABLE results ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
+
+    attempts_cols = await _get_table_columns(db, "attempts")
+    if "tenant_id" not in attempts_cols:
+        logger.info("Migration v9: adding tenant_id to attempts")
+        await db.execute("ALTER TABLE attempts ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
+
+    grants_cols = await _get_table_columns(db, "attempt_grants")
+    if "tenant_id" not in grants_cols:
+        logger.info("Migration v9: adding tenant_id to attempt_grants")
+        await db.execute("ALTER TABLE attempt_grants ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
+
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_results_tenant ON results(tenant_id)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_attempts_tenant ON attempts(tenant_id)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_attempt_grants_tenant ON attempt_grants(tenant_id)")
+    logger.info("Migration to v9 complete")
+
+
 async def get_vm_username(tg_id: int) -> str:
     """Get stored VM username for a user. Returns empty string if not set."""
+    if USE_POSTGRES:
+        row = await asyncio.to_thread(
+            _pg_fetchone_sync,
+            "SELECT vm_username FROM users WHERE tg_id = %s",
+            (tg_id,),
+        )
+        return (row.get("vm_username") or "") if row else ""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT vm_username FROM users WHERE tg_id = ?", (tg_id,)
@@ -284,6 +363,13 @@ async def get_vm_username(tg_id: int) -> str:
 
 async def set_vm_username(tg_id: int, username: str) -> None:
     """Store VM username for a user."""
+    if USE_POSTGRES:
+        await asyncio.to_thread(
+            _pg_execute_sync,
+            "UPDATE users SET vm_username = %s WHERE tg_id = %s",
+            (username, tg_id),
+        )
+        return
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE users SET vm_username = ? WHERE tg_id = ?", (username, tg_id)
@@ -293,6 +379,13 @@ async def set_vm_username(tg_id: int, username: str) -> None:
 
 async def get_lms_api_key(tg_id: int) -> str:
     """Get stored LMS API key for a user. Returns empty string if not set."""
+    if USE_POSTGRES:
+        row = await asyncio.to_thread(
+            _pg_fetchone_sync,
+            "SELECT lms_api_key FROM users WHERE tg_id = %s",
+            (tg_id,),
+        )
+        return (row.get("lms_api_key") or "") if row else ""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT lms_api_key FROM users WHERE tg_id = ?", (tg_id,)
@@ -303,6 +396,13 @@ async def get_lms_api_key(tg_id: int) -> str:
 
 async def set_lms_api_key(tg_id: int, key: str) -> None:
     """Store LMS API key for a user."""
+    if USE_POSTGRES:
+        await asyncio.to_thread(
+            _pg_execute_sync,
+            "UPDATE users SET lms_api_key = %s WHERE tg_id = %s",
+            (key, tg_id),
+        )
+        return
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE users SET lms_api_key = ? WHERE tg_id = ?", (key, tg_id)
@@ -312,6 +412,13 @@ async def set_lms_api_key(tg_id: int, key: str) -> None:
 
 async def log_api_access(email: str, endpoint: str) -> None:
     """Record that a student called an API endpoint."""
+    if USE_POSTGRES:
+        await asyncio.to_thread(
+            _pg_execute_sync,
+            "INSERT INTO api_access_log (tenant_id, email, endpoint) VALUES (%s, %s, %s)",
+            (DEFAULT_TENANT_ID, email, endpoint),
+        )
+        return
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT INTO api_access_log (email, endpoint) VALUES (?, ?)",
@@ -322,6 +429,18 @@ async def log_api_access(email: str, endpoint: str) -> None:
 
 async def get_api_access_summary(email: str) -> list[dict]:
     """Return distinct endpoints a student has called, with counts and first/last timestamps."""
+    if USE_POSTGRES:
+        return await asyncio.to_thread(
+            _pg_fetchall_sync,
+            """
+            SELECT endpoint, COUNT(*) as call_count,
+                   MIN(timestamp) as first_call, MAX(timestamp) as last_call
+            FROM api_access_log
+            WHERE tenant_id = %s AND email = %s
+            GROUP BY endpoint
+            """,
+            (DEFAULT_TENANT_ID, email),
+        )
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -362,6 +481,13 @@ async def _backfill_groups(db: aiosqlite.Connection) -> None:
 
 async def get_server_ip(tg_id: int) -> str:
     """Get stored server IP for a user. Returns empty string if not set."""
+    if USE_POSTGRES:
+        row = await asyncio.to_thread(
+            _pg_fetchone_sync,
+            "SELECT server_ip FROM users WHERE tg_id = %s",
+            (tg_id,),
+        )
+        return (row.get("server_ip") or "") if row else ""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT server_ip FROM users WHERE tg_id = ?", (tg_id,)
@@ -372,6 +498,13 @@ async def get_server_ip(tg_id: int) -> str:
 
 async def get_server_ip_owner(ip: str, exclude_tg_id: int) -> Optional[str]:
     """Check if a server IP is already used by another student. Returns github_alias or None."""
+    if USE_POSTGRES:
+        row = await asyncio.to_thread(
+            _pg_fetchone_sync,
+            "SELECT github_alias FROM users WHERE server_ip = %s AND tg_id != %s",
+            (ip, exclude_tg_id),
+        )
+        return row.get("github_alias") if row else None
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT github_alias FROM users WHERE server_ip = ? AND tg_id != ?", (ip, exclude_tg_id)
@@ -382,6 +515,13 @@ async def get_server_ip_owner(ip: str, exclude_tg_id: int) -> Optional[str]:
 
 async def set_server_ip(tg_id: int, ip: str) -> None:
     """Store server IP for a user."""
+    if USE_POSTGRES:
+        await asyncio.to_thread(
+            _pg_execute_sync,
+            "UPDATE users SET server_ip = %s WHERE tg_id = %s",
+            (ip, tg_id),
+        )
+        return
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE users SET server_ip = ? WHERE tg_id = ?", (ip, tg_id)
@@ -391,10 +531,27 @@ async def set_server_ip(tg_id: int, ip: str) -> None:
 
 async def get_user(tg_id: int) -> Optional[User]:
     """Get user by Telegram ID."""
+    if USE_POSTGRES:
+        row = await asyncio.to_thread(
+            _pg_fetchone_sync,
+            "SELECT tg_id, email, github_alias, tg_username, is_admin, role, tenant_id FROM users WHERE tg_id = %s",
+            (tg_id,),
+        )
+        if row:
+            return User(
+                tg_id=row["tg_id"],
+                email=row["email"],
+                github_alias=row["github_alias"],
+                tg_username=row["tg_username"],
+                is_admin=bool(row["is_admin"]),
+                role=row.get("role") or "student",
+                tenant_id=row.get("tenant_id") or DEFAULT_TENANT_ID,
+            )
+        return None
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT tg_id, email, github_alias, tg_username, is_admin FROM users WHERE tg_id = ?",
+            "SELECT tg_id, email, github_alias, tg_username, is_admin, role, tenant_id FROM users WHERE tg_id = ?",
             (tg_id,)
         ) as cursor:
             row = await cursor.fetchone()
@@ -404,13 +561,18 @@ async def get_user(tg_id: int) -> Optional[User]:
                     email=row["email"],
                     github_alias=row["github_alias"],
                     tg_username=row["tg_username"],
-                    is_admin=bool(row["is_admin"])
+                    is_admin=bool(row["is_admin"]),
+                    role=row["role"] or "student",
+                    tenant_id=row["tenant_id"] or DEFAULT_TENANT_ID,
                 )
             return None
 
 
 async def delete_user(tg_id: int) -> None:
     """Delete user by Telegram ID."""
+    if USE_POSTGRES:
+        await asyncio.to_thread(_pg_execute_sync, "DELETE FROM users WHERE tg_id = %s", (tg_id,))
+        return
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM users WHERE tg_id = ?", (tg_id,))
         await db.commit()
@@ -418,10 +580,27 @@ async def delete_user(tg_id: int) -> None:
 
 async def get_user_by_email(email: str) -> Optional[User]:
     """Get user by email address."""
+    if USE_POSTGRES:
+        row = await asyncio.to_thread(
+            _pg_fetchone_sync,
+            "SELECT tg_id, email, github_alias, tg_username, is_admin, role, tenant_id FROM users WHERE tenant_id = %s AND email = %s",
+            (DEFAULT_TENANT_ID, email),
+        )
+        if row:
+            return User(
+                tg_id=row["tg_id"],
+                email=row["email"],
+                github_alias=row["github_alias"],
+                tg_username=row["tg_username"],
+                is_admin=bool(row["is_admin"]),
+                role=row.get("role") or "student",
+                tenant_id=row.get("tenant_id") or DEFAULT_TENANT_ID,
+            )
+        return None
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT tg_id, email, github_alias, tg_username, is_admin FROM users WHERE email = ?",
+            "SELECT tg_id, email, github_alias, tg_username, is_admin, role, tenant_id FROM users WHERE email = ?",
             (email,)
         ) as cursor:
             row = await cursor.fetchone()
@@ -431,17 +610,36 @@ async def get_user_by_email(email: str) -> Optional[User]:
                     email=row["email"],
                     github_alias=row["github_alias"],
                     tg_username=row["tg_username"],
-                    is_admin=bool(row["is_admin"])
+                    is_admin=bool(row["is_admin"]),
+                    role=row["role"] or "student",
+                    tenant_id=row["tenant_id"] or DEFAULT_TENANT_ID,
                 )
             return None
 
 
 async def get_user_by_github(github_alias: str) -> Optional[User]:
     """Get user by GitHub alias."""
+    if USE_POSTGRES:
+        row = await asyncio.to_thread(
+            _pg_fetchone_sync,
+            "SELECT tg_id, email, github_alias, tg_username, is_admin, role, tenant_id FROM users WHERE tenant_id = %s AND github_alias = %s",
+            (DEFAULT_TENANT_ID, github_alias),
+        )
+        if row:
+            return User(
+                tg_id=row["tg_id"],
+                email=row["email"],
+                github_alias=row["github_alias"],
+                tg_username=row["tg_username"],
+                is_admin=bool(row["is_admin"]),
+                role=row.get("role") or "student",
+                tenant_id=row.get("tenant_id") or DEFAULT_TENANT_ID,
+            )
+        return None
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT tg_id, email, github_alias, tg_username, is_admin FROM users WHERE github_alias = ?",
+            "SELECT tg_id, email, github_alias, tg_username, is_admin, role, tenant_id FROM users WHERE github_alias = ?",
             (github_alias,)
         ) as cursor:
             row = await cursor.fetchone()
@@ -451,18 +649,62 @@ async def get_user_by_github(github_alias: str) -> Optional[User]:
                     email=row["email"],
                     github_alias=row["github_alias"],
                     tg_username=row["tg_username"],
-                    is_admin=bool(row["is_admin"])
+                    is_admin=bool(row["is_admin"]),
+                    role=row["role"] or "student",
+                    tenant_id=row["tenant_id"] or DEFAULT_TENANT_ID,
                 )
             return None
 
 
-async def upsert_user(tg_id: int, email: str, github_alias: str, tg_username: str = "", student_group: str = "") -> None:
+async def upsert_user(
+    tg_id: int,
+    email: str,
+    github_alias: str,
+    tg_username: str = "",
+    student_group: str = "",
+    tenant_id: str = DEFAULT_TENANT_ID,
+    role: str = "student",
+) -> None:
     """Create or update a user.
 
     First-come-first-served: if the email or github_alias already belongs
     to a different Telegram account, the operation is rejected with a
     ValueError so the handler can inform the student.
     """
+    if USE_POSTGRES:
+        # uniqueness in tenant scope
+        row = await asyncio.to_thread(
+            _pg_fetchone_sync,
+            "SELECT tg_id FROM users WHERE tenant_id = %s AND email = %s AND tg_id != %s",
+            (tenant_id, email, tg_id),
+        )
+        if row:
+            raise ValueError(f"Email {email} is already registered to another account.")
+        row = await asyncio.to_thread(
+            _pg_fetchone_sync,
+            "SELECT tg_id FROM users WHERE tenant_id = %s AND github_alias = %s AND tg_id != %s",
+            (tenant_id, github_alias, tg_id),
+        )
+        if row:
+            raise ValueError(f"GitHub username {github_alias} is already registered to another account.")
+
+        await asyncio.to_thread(
+            _pg_execute_sync,
+            """
+            INSERT INTO users (
+                tg_id, tenant_id, role, email, github_alias, tg_username, student_group
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT(tg_id) DO UPDATE SET
+                tenant_id = EXCLUDED.tenant_id,
+                role = EXCLUDED.role,
+                email = EXCLUDED.email,
+                github_alias = EXCLUDED.github_alias,
+                tg_username = EXCLUDED.tg_username,
+                student_group = EXCLUDED.student_group
+            """,
+            (tg_id, tenant_id, role, email, github_alias, tg_username, student_group),
+        )
+        return
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
 
@@ -481,19 +723,28 @@ async def upsert_user(tg_id: int, email: str, github_alias: str, tg_username: st
                 raise ValueError(f"GitHub username {github_alias} is already registered to another account.")
 
         await db.execute("""
-            INSERT INTO users (tg_id, email, github_alias, tg_username, student_group)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO users (tg_id, email, github_alias, tg_username, student_group, tenant_id, role)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(tg_id) DO UPDATE SET
                 email = excluded.email,
                 github_alias = excluded.github_alias,
                 tg_username = excluded.tg_username,
-                student_group = excluded.student_group
-        """, (tg_id, email, github_alias, tg_username, student_group))
+                student_group = excluded.student_group,
+                tenant_id = excluded.tenant_id,
+                role = excluded.role
+        """, (tg_id, email, github_alias, tg_username, student_group, tenant_id, role))
         await db.commit()
 
 
 async def get_attempts_count(tg_id: int, lab_id: str, task_id: str = "") -> int:
     """Get the number of attempts for a specific task by user."""
+    if USE_POSTGRES:
+        row = await asyncio.to_thread(
+            _pg_fetchone_sync,
+            "SELECT COUNT(*) AS cnt FROM attempts WHERE tenant_id = %s AND tg_id = %s AND lab_id = %s AND task_id = %s",
+            (DEFAULT_TENANT_ID, tg_id, lab_id, task_id),
+        )
+        return int(row["cnt"]) if row else 0
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT COUNT(*) FROM attempts WHERE tg_id = ? AND lab_id = ? AND task_id = ?",
@@ -505,6 +756,15 @@ async def get_attempts_count(tg_id: int, lab_id: str, task_id: str = "") -> int:
 
 async def get_attempt_grants(tg_id: int, lab_id: str, task_id: str = "") -> int:
     """Get the total number of instructor-granted attempts for a task."""
+    if USE_POSTGRES:
+        row = await asyncio.to_thread(
+            _pg_fetchone_sync,
+            """SELECT COALESCE(SUM(amount), 0) AS total
+               FROM attempt_grants
+               WHERE tenant_id = %s AND tg_id = %s AND lab_id = %s AND task_id = %s""",
+            (DEFAULT_TENANT_ID, tg_id, lab_id, task_id),
+        )
+        return int(row["total"]) if row and row["total"] is not None else 0
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             """SELECT COALESCE(SUM(amount), 0)
@@ -527,6 +787,14 @@ async def add_attempt_grant(
     if amount <= 0:
         return
 
+    if USE_POSTGRES:
+        await asyncio.to_thread(
+            _pg_execute_sync,
+            """INSERT INTO attempt_grants (tenant_id, tg_id, lab_id, task_id, amount, reason, timestamp)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            (DEFAULT_TENANT_ID, tg_id, lab_id, task_id, amount, reason, datetime.now().isoformat()),
+        )
+        return
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """INSERT INTO attempt_grants (tg_id, lab_id, task_id, amount, reason, timestamp)
@@ -543,10 +811,17 @@ async def get_effective_attempt_limit(tg_id: int, lab_id: str, task_id: str = ""
 
 async def add_attempt(tg_id: int, lab_id: str, task_id: str = "") -> None:
     """Record a new attempt for a task."""
+    if USE_POSTGRES:
+        await asyncio.to_thread(
+            _pg_execute_sync,
+            "INSERT INTO attempts (tenant_id, tg_id, lab_id, task_id, timestamp) VALUES (%s, %s, %s, %s, %s)",
+            (DEFAULT_TENANT_ID, tg_id, lab_id, task_id, datetime.now().isoformat()),
+        )
+        return
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT INTO attempts (tg_id, lab_id, task_id, timestamp) VALUES (?, ?, ?, ?)",
-            (tg_id, lab_id, task_id, datetime.now().isoformat())
+            "INSERT INTO attempts (tg_id, lab_id, task_id, tenant_id, timestamp) VALUES (?, ?, ?, ?, ?)",
+            (tg_id, lab_id, task_id, DEFAULT_TENANT_ID, datetime.now().isoformat())
         )
         await db.commit()
 
@@ -562,11 +837,30 @@ async def save_result(
     details: Optional[str] = None,
 ) -> None:
     """Save a check result to the database."""
+    if USE_POSTGRES:
+        await asyncio.to_thread(
+            _pg_execute_sync,
+            """INSERT INTO results (tenant_id, tg_id, lab_id, task_id, score, passed, failed, total, details, timestamp)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)""",
+            (
+                DEFAULT_TENANT_ID,
+                tg_id,
+                lab_id,
+                task_id,
+                score,
+                passed,
+                failed,
+                total,
+                details or "[]",
+                datetime.now().isoformat(),
+            ),
+        )
+        return
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            """INSERT INTO results (tg_id, lab_id, task_id, score, passed, failed, total, details, timestamp)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (tg_id, lab_id, task_id, score, passed, failed, total, details or "", datetime.now().isoformat())
+            """INSERT INTO results (tg_id, lab_id, task_id, score, passed, failed, total, details, tenant_id, timestamp)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (tg_id, lab_id, task_id, score, passed, failed, total, details or "", DEFAULT_TENANT_ID, datetime.now().isoformat())
         )
         await db.commit()
 
@@ -589,6 +883,66 @@ async def get_task_stats(tg_id: int) -> dict[str, dict]:
         }
     """
     stats: dict[str, dict] = {}
+    if USE_POSTGRES:
+        attempt_rows = await asyncio.to_thread(
+            _pg_fetchall_sync,
+            """SELECT lab_id, task_id, COUNT(*) as cnt
+               FROM attempts
+               WHERE tenant_id = %s AND tg_id = %s
+               GROUP BY lab_id, task_id""",
+            (DEFAULT_TENANT_ID, tg_id),
+        )
+        for row in attempt_rows:
+            key = f"{row['lab_id']}:{row['task_id']}"
+            stats[key] = {"attempts": row["cnt"], "score": None, "passed": None, "failed": None, "total": None}
+
+        grant_rows = await asyncio.to_thread(
+            _pg_fetchall_sync,
+            """SELECT lab_id, task_id, COALESCE(SUM(amount), 0) as granted
+               FROM attempt_grants
+               WHERE tenant_id = %s AND tg_id = %s
+               GROUP BY lab_id, task_id""",
+            (DEFAULT_TENANT_ID, tg_id),
+        )
+        for row in grant_rows:
+            key = f"{row['lab_id']}:{row['task_id']}"
+            stats.setdefault(key, {"attempts": 0, "score": None, "passed": None, "failed": None, "total": None})
+            stats[key]["granted_attempts"] = int(row["granted"] or 0)
+
+        result_rows = await asyncio.to_thread(
+            _pg_fetchall_sync,
+            """SELECT lab_id, task_id, score, passed, failed, total
+               FROM results
+               WHERE tenant_id = %s AND tg_id = %s""",
+            (DEFAULT_TENANT_ID, tg_id),
+        )
+        for row in result_rows:
+            key = f"{row['lab_id']}:{row['task_id']}"
+            if key not in stats:
+                stats[key] = {"attempts": 0}
+            cur_p = row["passed"] or 0
+            cur_np = (row["total"] or 0) - cur_p
+            prev = stats[key]
+            prev_p = prev.get("passed") or 0
+            prev_np = (prev.get("total") or 0) - prev_p
+            if prev.get("score") is None or (-cur_p, cur_np) < (-prev_p, prev_np):
+                stats[key].update({
+                    "score": row["score"],
+                    "passed": row["passed"],
+                    "failed": row["failed"],
+                    "total": row["total"],
+                })
+
+        for key, value in stats.items():
+            lab_id, task_id = key.split(":", 1)
+            granted = int(value.get("granted_attempts", 0) or 0)
+            max_attempts = get_max_attempts(lab_id, task_id) + granted
+            attempts = int(value.get("attempts", 0) or 0)
+            value["granted_attempts"] = granted
+            value["max_attempts"] = max_attempts
+            value["remaining"] = max(0, max_attempts - attempts)
+        return stats
+
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
 
@@ -650,6 +1004,15 @@ async def get_task_stats(tg_id: int) -> dict[str, dict]:
 
 async def has_passed_task(tg_id: int, lab_id: str, task_id: str) -> bool:
     """Check if a user has passed a task (failed_checks == 0 with total > 0)."""
+    if USE_POSTGRES:
+        row = await asyncio.to_thread(
+            _pg_fetchone_sync,
+            """SELECT 1 AS ok FROM results
+               WHERE tenant_id = %s AND tg_id = %s AND lab_id = %s AND task_id = %s
+                 AND failed = 0 AND total > 0 LIMIT 1""",
+            (DEFAULT_TENANT_ID, tg_id, lab_id, task_id),
+        )
+        return row is not None
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT 1 FROM results WHERE tg_id = ? AND lab_id = ? AND task_id = ? AND failed = 0 AND total > 0 LIMIT 1",
@@ -660,6 +1023,25 @@ async def has_passed_task(tg_id: int, lab_id: str, task_id: str) -> bool:
 
 async def get_all_users() -> list[User]:
     """Get all users from the database."""
+    if USE_POSTGRES:
+        rows = await asyncio.to_thread(
+            _pg_fetchall_sync,
+            """SELECT tg_id, email, github_alias, tg_username, is_admin, role, tenant_id
+               FROM users WHERE tenant_id = %s ORDER BY github_alias""",
+            (DEFAULT_TENANT_ID,),
+        )
+        return [
+            User(
+                tg_id=row["tg_id"],
+                email=row["email"],
+                github_alias=row["github_alias"],
+                tg_username=row["tg_username"],
+                is_admin=bool(row["is_admin"]),
+                role=row.get("role") or "student",
+                tenant_id=row.get("tenant_id") or DEFAULT_TENANT_ID,
+            )
+            for row in rows
+        ]
     users = []
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
