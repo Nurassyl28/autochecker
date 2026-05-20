@@ -159,6 +159,21 @@ async def main():
         check("Feedback has summary", bool(fb.get("summary")))
         check("Feedback has 4 check_results", len(fb.get("check_results", [])) == 4)
 
+        # ── 6b. Student asks LLM about their submission ───────────────────────
+        print("\n── STUDENT ASKS LLM ──")
+        with patch("api.routes.student.llm_complete",
+                   new=AsyncMock(return_value="You need to add a .js file with a form validation function.")):
+            r = await client.post(f"/student/submissions/{sub_id}/ask", headers=SH,
+                                   json={"question": "Why did I fail the JS check?"})
+            check("Ask LLM → 200", r.status_code == 200, r.status_code)
+            ans = r.json()
+            check("Answer contains question", ans.get("question") == "Why did I fail the JS check?")
+            check("Answer is not empty", bool(ans.get("answer")))
+
+        r = await client.post(f"/student/submissions/{sub_id}/ask", headers=SH,
+                               json={"question": ""})
+        check("Empty question → 400", r.status_code == 400, r.status_code)
+
         # ── 7. Teacher sees student profile ───────────────────────────────────
         print("\n── TEACHER SEES STUDENT PROFILE ──")
         r = await client.post("/auth/login",

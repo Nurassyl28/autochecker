@@ -1,11 +1,22 @@
 """Student routes: view assignments, submit repos, view feedback."""
 
+import json
+import logging
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from pydantic import BaseModel
 
 from .. import database as db
 from ..dependencies import require_student
+from ..llm.adapter import llm_complete
 from ..models import SubmitRequest, SubmissionResponse
 from ..worker import process_submission
+
+logger = logging.getLogger(__name__)
+
+
+class AskLLMRequest(BaseModel):
+    question: str
 
 router = APIRouter(prefix="/student", tags=["student"])
 
@@ -77,3 +88,55 @@ async def get_submission(submission_id: int, student: dict = Depends(require_stu
     if not row:
         raise HTTPException(404, "Submission not found")
     return dict(row)
+
+
+@router.post("/submissions/{submission_id}/ask")
+async def ask_llm(
+    submission_id: int,
+    body: AskLLMRequest,
+    student: dict = Depends(require_student),
+):
+    """Student asks the LLM a question about their submission result."""
+    if not body.question.strip():
+        raise HTTPException(400, "Question cannot be empty")
+
+    row = await db.fetchone(
+        """
+        SELECT s.feedback_json, s.pass_fail, s.score, s.status,
+               a.title AS assignment_title, a.description_text
+        FROM submissions s
+        JOIN assignments a ON a.id = s.assignment_id
+        WHERE s.id = %s AND s.student_id = %s
+        """,
+        (submission_id, student["id"]),
+    )
+    if not row:
+        raise HTTPException(404, "Submission not found")
+    if row["status"] != "done":
+        raise HTTPException(409, "Submission is not finished yet")
+
+    feedback = row["feedback_json"] or {}
+    system = (
+        "You are an AI tutor helping a student understand their assignment result. "
+        "Be specific, encouraging, and action-oriented. Answer in 2-4 sentences."
+    )
+    context = (
+        f"Assignment: {row['assignment_title']}\n"
+        f"Result: {row['pass_fail']} (score: {row['score']:.0%})\n"
+        f"Summary: {feedback.get('summary', '')}\n"
+        f"Failed checks:\n" +
+        "\n".join(
+            f"- {c['id']}: {c.get('feedback', '')}"
+            for c in feedback.get("check_results", [])
+            if not c.get("passed")
+        )
+    )
+    user_msg = f"Context:\n{context}\n\nStudent question: {body.question}"
+
+    try:
+        answer = await llm_complete(system=system, user=user_msg)
+    except Exception as exc:
+        logger.warning("LLM ask failed for submission %s: %s", submission_id, exc)
+        raise HTTPException(503, "LLM service unavailable. Try again later.")
+
+    return {"question": body.question, "answer": answer}
