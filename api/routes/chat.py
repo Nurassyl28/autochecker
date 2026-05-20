@@ -54,7 +54,7 @@ async def get_messages(
         raise HTTPException(404, "User not found")
 
     extra = ""
-    params: list = [user["id"], other_user_id, user["id"], other_user_id, user["university_id"]]
+    params: list = [user["id"], other_user_id, other_user_id, user["id"], user["university_id"]]
     if before_id:
         extra = "AND id < %s"
         params.append(before_id)
