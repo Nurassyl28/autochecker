@@ -1,0 +1,248 @@
+@import "tailwindcss";
+
+@theme {
+  /* ── Figma design tokens ── */
+  --color-primary: #3525cd;
+  --color-primary-dark: #142175;
+  --color-primary-mid: #28247e;
+  --color-primary-light: #4f46e5;
+
+  /* ── Backgrounds ── */
+  --color-bg: #f9fafb;
+  --color-bg-alt: #fbf8ff;
+  --color-sidebar: #f9fafb;
+  --color-topbar: #f9fafb;
+
+  /* ── Card / surface hierarchy ── */
+  --color-card: #ffffff;          /* white panels / cards */
+  --color-card-alt: #f9f8ff;      /* slightly elevated areas */
+  --color-card-input: #efedf4;    /* search / input field background */
+  --color-card-subtle: #f5f3fa;   /* subtle tinted areas */
+
+  /* ── Borders ── */
+  --color-border: #e7e9ed;
+  --color-border-card: #e3dfe8;
+  --color-border-light: #d8d8e2;
+  --color-border-input: #bdbccc;
+
+  /* ── Text ── */
+  --color-text-primary: #000000;
+  --color-text-dark: #1a1a1a;
+  --color-text-muted: #495469;
+  --color-text-light: #6b7280;
+  --color-text-subtle: #888888;
+  --color-nav-active: #0500c7;
+  --color-nav-active-bg: transparent;
+
+  /* ── Accent / buttons ── */
+  --color-accent: #142175;
+  --color-accent-mid: #28247e;
+  --color-btn-primary-bg: #142175;
+  --color-btn-primary-color: #ffffff;
+  --color-progress-active: #142175;
+  --icon-filter: none;
+
+  /* ── Status ── */
+  --color-status-pass-bg: #f2fcf5;
+  --color-status-pass-border: #d1f8df;
+  --color-status-pass-text: #62a87d;
+
+  --color-status-partial-bg: #fffbeb;
+  --color-status-partial-border: #fde372;
+  --color-status-partial-text: #af3f00;
+
+  --color-status-fail-bg: #fef2f2;
+  --color-status-fail-border: #fec7c7;
+  --color-status-fail-text: #8f0000;
+
+  --color-status-inprogress-bg: #eef2ff;
+  --color-status-inprogress-border: #d2dbfe;
+  --color-status-inprogress-text: #3332ce;
+
+  --font-inter: "Inter", sans-serif;
+  --sidebar-width: 288px;
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  body {
+    background-color: var(--color-bg);
+    color: var(--color-text-primary);
+    margin: 0;
+    padding: 0;
+  }
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #9ca3af;
+}
+
+/* ══════════════════════════════════════════
+   Dark mode — CSS variable overrides
+   All components reference var(--color-*)
+   so changing variables here is sufficient.
+   ══════════════════════════════════════════ */
+
+html.dark {
+  color-scheme: dark;
+
+  /* Backgrounds */
+  --color-bg: #131317;
+  --color-bg-alt: #131317;
+  --color-sidebar: #1f1f23;
+  --color-topbar: #1f1f23;
+
+  /* Surfaces */
+  --color-card: #1f1f23;
+  --color-card-alt: #1f1f23;
+  --color-card-input: #2a2a30;
+  --color-card-subtle: #1a1a1e;
+
+  /* Borders */
+  --color-border: #2d2d35;
+  --color-border-card: #454650;
+  --color-border-light: #2a2a30;
+  --color-border-input: #2a2a30;
+
+  /* Text */
+  --color-text-primary: #ffffff;
+  --color-text-dark: #ffffff;
+  --color-text-muted: #b8b8b8;
+  --color-text-light: #717178;
+  --color-text-subtle: #585e6b;
+  --color-nav-active: #ffffff;
+  --color-nav-active-bg: #41465a;
+
+  /* Accent / buttons */
+  --color-accent: #B4C5FF;
+  --color-accent-mid: #B4C5FF;
+  --color-btn-primary-bg: #B4C5FF;
+  --color-btn-primary-color: #0a0d2e;
+  --color-progress-active: #6b7eff;
+  --icon-filter: brightness(0) invert(1);
+}
+
+html.dark body {
+  background-color: var(--color-bg);
+  color: var(--color-text-primary);
+}
+
+html.dark aside {
+  background-color: var(--color-sidebar) !important;
+  border-color: var(--color-border) !important;
+}
+
+html.dark main {
+  background-color: var(--color-bg) !important;
+}
+
+/* ── Form elements ── */
+html.dark input,
+html.dark textarea,
+html.dark select {
+  color-scheme: dark;
+  color: var(--color-text-primary) !important;
+}
+
+html.dark ::placeholder {
+  color: var(--color-text-subtle) !important;
+  opacity: 1;
+}
+
+/* ── Scrollbar dark ── */
+html.dark ::-webkit-scrollbar-thumb {
+  background: #363a4d;
+}
+html.dark ::-webkit-scrollbar-thumb:hover {
+  background: #4a4e62;
+}
+
+/* ── Mobile / Tablet responsive ── */
+
+.sidebar-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 90;
+}
+
+@media (max-width: 768px) {
+  .dashboard-layout {
+    position: relative;
+  }
+
+  .dashboard-sidebar {
+    position: fixed !important;
+    left: -288px;
+    top: 0;
+    height: 100vh;
+    z-index: 100;
+    transition: left 0.25s ease;
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.12);
+  }
+
+  .dashboard-sidebar.open {
+    left: 0;
+  }
+
+  .sidebar-overlay.visible {
+    display: block;
+  }
+
+  .dashboard-main {
+    padding-top: 60px !important;
+  }
+
+  .mobile-topbar {
+    display: flex !important;
+  }
+}
+
+@media (min-width: 769px) {
+  .mobile-topbar {
+    display: none !important;
+  }
+}
+
+/* Mobile top bar */
+.mobile-topbar {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 56px;
+  background: var(--color-card);
+  border-bottom: 1px solid var(--color-border);
+  z-index: 80;
+  align-items: center;
+  padding: 0 16px;
+  gap: 12px;
+}
+
+@media (max-width: 1024px) {
+  .dashboard-sidebar {
+    width: 240px !important;
+    min-width: 240px !important;
+  }
+}
