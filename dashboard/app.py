@@ -18,6 +18,7 @@ from urllib.parse import urlencode
 import aiosqlite
 import yaml
 from fastapi import FastAPI, Form, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
@@ -36,6 +37,19 @@ MAX_ATTEMPTS_EVAL_TASK = int(os.getenv("MAX_ATTEMPTS_EVAL_TASK", "20"))
 COOKIE_NAME = "dash_auth"
 
 app = FastAPI(title="Autochecker Dashboard")
+
+_ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+    if o.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+)
 
 
 @app.on_event("startup")
@@ -1253,3 +1267,377 @@ async def api_eval_question(
     if q.get("rubric"):
         response["has_rubric"] = True  # flag only, don't expose rubric text
     return JSONResponse(response)
+
+
+# ---------------------------------------------------------------------------
+# Frontend JSON API — new endpoints for Next.js frontend
+# ---------------------------------------------------------------------------
+
+def _check_teacher_auth(request: Request) -> bool:
+    """Return True if the request carries a valid teacher session cookie."""
+    if not DASHBOARD_PASSWORD:
+        return True
+    return _verify_cookie(request.cookies.get(COOKIE_NAME, ""))
+
+
+@app.post("/api/auth/teacher")
+async def teacher_login_api(request: Request):
+    """JSON login for teachers. Sets auth cookie and returns {ok: true}."""
+    body = await request.json()
+    password = body.get("password", "")
+    if DASHBOARD_PASSWORD and not hmac.compare_digest(password, DASHBOARD_PASSWORD):
+        return JSONResponse({"error": "wrong password"}, status_code=401)
+    response = JSONResponse({"ok": True, "role": "teacher"})
+    response.set_cookie(
+        COOKIE_NAME,
+        _sign_cookie(DASHBOARD_PASSWORD),
+        httponly=True,
+        samesite="lax",
+        max_age=60 * 60 * 24 * 30,
+    )
+    return response
+
+
+@app.post("/api/auth/student")
+async def student_login_api(request: Request):
+    """Verify student email (registered via Telegram). Returns student info."""
+    body = await request.json()
+    email = (body.get("email") or "").strip().lower()
+    if not email:
+        return JSONResponse({"error": "email required"}, status_code=400)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT tg_id, email, github_alias, tg_username, student_group FROM users WHERE LOWER(email) = ?",
+            (email,),
+        ) as cur:
+            row = await cur.fetchone()
+
+    if not row:
+        return JSONResponse({"error": "email not found"}, status_code=404)
+    return JSONResponse(dict(row))
+
+
+@app.get("/api/students")
+async def api_students_list(request: Request):
+    """Return all students with aggregated stats. Teacher auth required."""
+    if not _check_teacher_auth(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    task_meta = load_task_metadata()
+    _PASS_STATUSES = ("pass", "partial")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        students: list[dict] = []
+        async with db.execute(
+            "SELECT tg_id, email, github_alias, tg_username, student_group FROM users ORDER BY github_alias"
+        ) as cur:
+            async for row in cur:
+                students.append(dict(row))
+
+        scores = await _fetch_best_scores(db)
+
+        last_submission: dict[int, str] = {}
+        async with db.execute(
+            "SELECT tg_id, MAX(timestamp) AS last_ts FROM results GROUP BY tg_id"
+        ) as cur:
+            async for row in cur:
+                last_submission[row["tg_id"]] = row["last_ts"] or ""
+
+        attempts_count: dict[int, int] = {}
+        async with db.execute(
+            "SELECT tg_id, COUNT(*) AS cnt FROM attempts GROUP BY tg_id"
+        ) as cur:
+            async for row in cur:
+                attempts_count[row["tg_id"]] = row["cnt"]
+
+    total_tasks = len(task_meta)
+    result: list[dict] = []
+    for s in students:
+        tg_id = s["tg_id"]
+        student_scores = scores.get(tg_id, {})
+
+        passed_tasks = sum(
+            1 for e in student_scores.values() if e.get("status") in _PASS_STATUSES
+        )
+        progress = round(passed_tasks / total_tasks * 100) if total_tasks else 0
+
+        pct_vals = [e["pct"] for e in student_scores.values() if e.get("pct", -1) >= 0]
+        avg_score = round(sum(pct_vals) / len(pct_vals)) if pct_vals else 0
+
+        ts = last_submission.get(tg_id, "")
+        result.append({
+            **s,
+            "last_submission": ts[:16].replace("T", " ") if ts else "",
+            "progress": progress,
+            "avg_score": avg_score,
+            "passed_tasks": passed_tasks,
+            "total_tasks": total_tasks,
+            "total_attempts": attempts_count.get(tg_id, 0),
+        })
+
+    return JSONResponse(result)
+
+
+@app.get("/api/student/{github_alias}/details")
+async def api_student_details(request: Request, github_alias: str):
+    """Return student JSON details: info + task attempts + results."""
+    if not _check_teacher_auth(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    return await _build_student_json(github_alias)
+
+
+@app.get("/api/me")
+async def api_me(request: Request, email: str = Query(...)):
+    """Return the logged-in student's own data by email (student-facing)."""
+    email = email.strip().lower()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT github_alias FROM users WHERE LOWER(email) = ?", (email,)
+        ) as cur:
+            row = await cur.fetchone()
+
+    if not row:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    return await _build_student_json(row["github_alias"])
+
+
+async def _build_student_json(github_alias: str) -> JSONResponse:
+    """Shared logic: build full student JSON response."""
+    task_meta = load_task_metadata()
+    task_meta_map = {f"{t['lab_id']}:{t['task_id']}": t for t in task_meta}
+    title_map = {k: v["title"] for k, v in task_meta_map.items()}
+    _PASS_STATUSES = ("pass", "partial")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        async with db.execute(
+            "SELECT tg_id, email, github_alias, tg_username, server_ip, student_group, vm_username "
+            "FROM users WHERE github_alias = ?",
+            (github_alias,),
+        ) as cur:
+            s_row = await cur.fetchone()
+
+        if not s_row:
+            return JSONResponse({"error": "not found"}, status_code=404)
+
+        student = dict(s_row)
+        tg_id = student["tg_id"]
+
+        results: list[dict] = []
+        async with db.execute(
+            "SELECT lab_id, task_id, score, passed, failed, total, details, timestamp "
+            "FROM results WHERE tg_id = ? ORDER BY timestamp DESC",
+            (tg_id,),
+        ) as cur:
+            async for r in cur:
+                r = dict(r)
+                key = f"{r['lab_id']}:{r['task_id']}"
+                r["title"] = title_map.get(key, r["task_id"])
+                r["status"] = _cell_status(r["passed"], r["failed"], r["total"])
+                checks: list = []
+                if r.get("details"):
+                    try:
+                        checks = json.loads(r["details"])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                r["checks"] = checks
+                results.append(r)
+
+        best_by_task: dict[str, dict] = {}
+        for result in results:
+            key = f"{result['lab_id']}:{result['task_id']}"
+            if key not in best_by_task:
+                best_by_task[key] = result
+            else:
+                prev = best_by_task[key]
+                cur_p = result.get("passed") or 0
+                prev_p = prev.get("passed") or 0
+                cur_np = (result.get("total") or 0) - cur_p
+                prev_np = (prev.get("total") or 0) - prev_p
+                if (-cur_p, cur_np) < (-prev_p, prev_np):
+                    best_by_task[key] = result
+
+        grants_by_task: dict[str, int] = {}
+        async with db.execute(
+            "SELECT lab_id, task_id, COALESCE(SUM(amount), 0) AS granted "
+            "FROM attempt_grants WHERE tg_id = ? GROUP BY lab_id, task_id",
+            (tg_id,),
+        ) as cur:
+            async for r in cur:
+                grants_by_task[f"{r['lab_id']}:{r['task_id']}"] = int(r["granted"] or 0)
+
+        task_map: dict[str, dict] = {}
+        async with db.execute(
+            "SELECT lab_id, task_id, COUNT(*) AS attempts, MAX(timestamp) AS last_attempt "
+            "FROM attempts WHERE tg_id = ? GROUP BY lab_id, task_id",
+            (tg_id,),
+        ) as cur:
+            async for r in cur:
+                key = f"{r['lab_id']}:{r['task_id']}"
+                best = best_by_task.get(key, {})
+                used = r["attempts"] or 0
+                base_max = task_meta_map.get(key, {}).get("max_attempts", MAX_ATTEMPTS_PER_TASK)
+                granted = grants_by_task.get(key, 0)
+                eff_max = base_max + granted
+                task_map[key] = {
+                    "lab_id": r["lab_id"],
+                    "task_id": r["task_id"],
+                    "title": title_map.get(key, r["task_id"]),
+                    "attempts": used,
+                    "max_attempts": eff_max,
+                    "remaining": max(0, eff_max - used),
+                    "score": best.get("score") or "—",
+                    "status": best.get("status", "none"),
+                    "last_attempt": (r["last_attempt"] or "")[:16].replace("T", " "),
+                }
+
+    # Fill in tasks with no attempts yet from spec
+    for t in task_meta:
+        key = f"{t['lab_id']}:{t['task_id']}"
+        if key not in task_map:
+            task_map[key] = {
+                "lab_id": t["lab_id"],
+                "task_id": t["task_id"],
+                "title": t["title"],
+                "attempts": 0,
+                "max_attempts": t["max_attempts"],
+                "remaining": t["max_attempts"],
+                "score": "—",
+                "status": "none",
+                "last_attempt": "",
+            }
+
+    tasks = sorted(task_map.values(), key=lambda x: (x["lab_id"], x["task_id"]))
+
+    passed_tasks = sum(1 for t in tasks if t["status"] in _PASS_STATUSES)
+    total_tasks = len(tasks)
+    pct_vals = []
+    for t in tasks:
+        if t["status"] in _PASS_STATUSES and t["score"] != "—":
+            try:
+                pct_vals.append(float(t["score"].split("%")[0]))
+            except (ValueError, AttributeError):
+                pass
+    avg_score = round(sum(pct_vals) / len(pct_vals)) if pct_vals else 0
+    progress = round(passed_tasks / total_tasks * 100) if total_tasks else 0
+
+    return JSONResponse({
+        "student": student,
+        "tasks": tasks,
+        "results": results,
+        "stats": {
+            "avg_score": avg_score,
+            "passed_tasks": passed_tasks,
+            "total_tasks": total_tasks,
+            "progress": progress,
+        },
+    })
+
+
+@app.get("/api/stats")
+async def api_dashboard_stats(request: Request):
+    """Return overview stats for the teacher dashboard."""
+    if not _check_teacher_auth(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    task_meta = load_task_metadata()
+    _PASS_STATUSES = ("pass", "partial")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT COUNT(*) AS cnt FROM users") as cur:
+            row = await cur.fetchone()
+            total_students = row["cnt"] if row else 0
+
+        scores = await _fetch_best_scores(db)
+
+    pass_pcts: list[float] = []
+    stuck_count = 0
+    active_issues = 0
+
+    for tg_id, student_scores in scores.items():
+        if not student_scores:
+            continue
+        passed = sum(1 for e in student_scores.values() if e.get("status") in _PASS_STATUSES)
+        total = len(task_meta)
+        if total:
+            pass_pcts.append(passed / total * 100)
+
+        fail_count = sum(1 for e in student_scores.values() if e.get("status") == "fail")
+        if fail_count >= 2:
+            active_issues += 1
+
+        pct_vals = [e["pct"] for e in student_scores.values() if e.get("pct", -1) >= 0]
+        if pct_vals and max(pct_vals) < 50:
+            stuck_count += 1
+
+    avg_performance = round(sum(pass_pcts) / len(pass_pcts)) if pass_pcts else 0
+
+    return JSONResponse({
+        "total_students": total_students,
+        "active_issues": active_issues,
+        "stuck": stuck_count,
+        "avg_performance": avg_performance,
+    })
+
+
+@app.get("/api/top10")
+async def api_top10(request: Request):
+    """Return top-10 students ranked by solved tasks and average score."""
+    if not _check_teacher_auth(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    task_meta = load_task_metadata()
+    _PASS_STATUSES = ("pass", "partial")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        students: list[dict] = []
+        async with db.execute(
+            "SELECT tg_id, email, github_alias, tg_username, student_group FROM users"
+        ) as cur:
+            async for row in cur:
+                students.append(dict(row))
+
+        scores = await _fetch_best_scores(db)
+
+    leaderboard: list[dict] = []
+    for s in students:
+        tg_id = s["tg_id"]
+        s_scores = scores.get(tg_id, {})
+
+        passed = sum(1 for e in s_scores.values() if e.get("status") in _PASS_STATUSES)
+        pct_vals = [e["pct"] for e in s_scores.values() if e.get("pct", -1) >= 0]
+        avg_pct = round(sum(pct_vals) / len(pct_vals)) if pct_vals else 0
+        points = passed * 100 + avg_pct
+
+        name = s.get("github_alias") or s.get("tg_username") or (s.get("email") or "?").split("@")[0]
+        parts = name.replace("-", " ").replace("_", " ").split()
+        initials = "".join(w[0].upper() for w in parts[:2]) or name[:2].upper()
+
+        leaderboard.append({
+            "tg_id": tg_id,
+            "name": name,
+            "email": s["email"],
+            "initials": initials,
+            "points": points,
+            "solved": passed,
+            "github_alias": s["github_alias"],
+            "trend": "stable",
+        })
+
+    leaderboard.sort(key=lambda x: x["points"], reverse=True)
+    top10 = leaderboard[:10]
+    for i, entry in enumerate(top10):
+        entry["rank"] = i + 1
+
+    return JSONResponse(top10)

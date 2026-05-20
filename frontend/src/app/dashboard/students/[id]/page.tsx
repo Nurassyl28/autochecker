@@ -3,53 +3,103 @@
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import {
-  getAllTgStudents,
-  getAddedStudents,
-  getAssignments,
-  getStudentScores,
-  calcStudentStats,
-  type TgStudent,
-  type Assignment,
-} from "@/lib/store";
+import { getStudentDetails } from "@/lib/api";
+
+interface TaskRow {
+  lab_id: string;
+  task_id: string;
+  title: string;
+  attempts: number;
+  max_attempts: number;
+  remaining: number;
+  score: string;
+  status: string;
+  last_attempt: string;
+}
+
+interface CheckDetail {
+  id: string;
+  status: "PASS" | "FAIL" | "ERROR";
+  description?: string;
+  details?: string;
+}
+
+interface ResultRow {
+  lab_id: string;
+  task_id: string;
+  title: string;
+  score: string;
+  passed: number;
+  failed: number;
+  total: number;
+  timestamp: string;
+  status: string;
+  checks: CheckDetail[];
+}
+
+interface StudentData {
+  student: {
+    tg_id: number;
+    email: string;
+    github_alias: string;
+    tg_username: string;
+    server_ip?: string;
+    student_group?: string;
+    vm_username?: string;
+  };
+  tasks: TaskRow[];
+  results: ResultRow[];
+}
 
 type StudentStatus = "active" | "stuck" | "needs_help";
 
-function getStatus(avg: number, total: number): StudentStatus {
-  if (total === 0) return "needs_help";
-  if (avg >= 4.0) return "active";
-  if (avg >= 3.0) return "needs_help";
+function deriveStatus(tasks: TaskRow[]): StudentStatus {
+  if (!tasks.length) return "needs_help";
+  const passed = tasks.filter((t) => t.status === "pass" || t.status === "partial").length;
+  const pct = (passed / tasks.length) * 100;
+  if (pct >= 70) return "active";
+  if (pct >= 30) return "needs_help";
   return "stuck";
 }
 
 const STATUS_LABELS: Record<StudentStatus, { label: string; bg: string; border: string; color: string }> = {
-  active: { label: "Активен", bg: "#ecfdf5", border: "#b5f5d7", color: "#0e3e12" },
-  stuck: { label: "В стопоре", bg: "#fef2f2", border: "#fec7c7", color: "#8f0000" },
-  needs_help: { label: "Нужна помощь", bg: "#fffbeb", border: "#fde372", color: "#af3f00" },
+  active:     { label: "Активен",       bg: "#ecfdf5", border: "#b5f5d7", color: "#0e3e12" },
+  stuck:      { label: "В стопоре",     bg: "#fef2f2", border: "#fec7c7", color: "#8f0000" },
+  needs_help: { label: "Нужна помощь",  bg: "#fffbeb", border: "#fde372", color: "#af3f00" },
 };
+
+function taskStatusColor(status: string) {
+  if (status === "pass")    return { bg: "#ecfdf5", color: "#0e3e12", label: "Сдано" };
+  if (status === "partial") return { bg: "#fffbeb", color: "#af3f00", label: "Частично" };
+  if (status === "fail")    return { bg: "#fef2f2", color: "#8f0000", label: "Не сдано" };
+  return { bg: "#f1f1f1", color: "#555", label: "—" };
+}
 
 export default function StudentDetailPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
 
-  const [student, setStudent] = useState<TgStudent | null>(null);
-  const [assignments, setAssignments] = useState<Assignment[]>([]);
-  const [scores, setScores] = useState<Record<string, number>>({});
-  const [stats, setStats] = useState({ avg: 0, total: 0 });
+  const [data, setData] = useState<StudentData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [expandedResult, setExpandedResult] = useState<string | null>(null);
 
   useEffect(() => {
-    const all = [...getAllTgStudents(), ...getAddedStudents()];
-    const unique = all.filter((s, i, arr) => arr.findIndex((x) => x.id === s.id) === i);
-    const found = unique.find((s) => s.id === id) || null;
-    setStudent(found);
-
-    const assigns = getAssignments();
-    setAssignments(assigns);
-    setScores(getStudentScores(id));
-    setStats(calcStudentStats(id));
+    if (!id) return;
+    getStudentDetails(id)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d) setData(d); })
+      .finally(() => setLoading(false));
   }, [id]);
 
-  if (!student) {
+  if (loading) {
+    return (
+      <div style={{ padding: "60px 45px", textAlign: "center", color: "var(--color-text-subtle)", fontSize: "18px" }}>
+        Загрузка...
+      </div>
+    );
+  }
+
+  if (!data) {
     return (
       <div style={{ padding: "60px 45px", textAlign: "center", color: "var(--color-text-subtle)", fontSize: "18px" }}>
         Студент не найден.
@@ -57,11 +107,20 @@ export default function StudentDetailPage() {
     );
   }
 
-  const status = getStatus(stats.avg, stats.total);
+  const { student, tasks, results } = data;
+  const status = deriveStatus(tasks);
   const statusInfo = STATUS_LABELS[status];
-  const gradedCount = Object.keys(scores).length;
-  const progress = assignments.length > 0 ? Math.round((gradedCount / assignments.length) * 100) : 0;
+  const passed = tasks.filter((t) => t.status === "pass" || t.status === "partial").length;
+  const progress = tasks.length ? Math.round((passed / tasks.length) * 100) : 0;
   const progressColor = status === "active" ? "var(--color-progress-active)" : status === "stuck" ? "#ba1a1a" : "#f59e0b";
+  const initials = (student.github_alias || student.email).slice(0, 2).toUpperCase();
+
+  // Group tasks by lab
+  const labGroups: Record<string, TaskRow[]> = {};
+  for (const t of tasks) {
+    if (!labGroups[t.lab_id]) labGroups[t.lab_id] = [];
+    labGroups[t.lab_id].push(t);
+  }
 
   return (
     <div style={{ backgroundColor: "var(--color-bg-alt)", minHeight: "100%" }}>
@@ -73,13 +132,11 @@ export default function StudentDetailPage() {
       }}>
         <button
           onClick={() => router.back()}
-          style={{
-            background: "none", border: "none", cursor: "pointer",
-            fontSize: "22px", color: "var(--color-text-muted)", padding: 0,
-            display: "flex", alignItems: "center",
-          }}
+          style={{ background: "none", border: "none", cursor: "pointer", fontSize: "22px", color: "var(--color-text-muted)", padding: 0 }}
         >←</button>
-        <span style={{ fontSize: "20px", fontWeight: 600, color: "var(--color-text-primary)" }}>Профиль студента</span>
+        <span style={{ fontSize: "20px", fontWeight: 600, color: "var(--color-text-primary)" }}>
+          Профиль студента
+        </span>
       </div>
 
       <div style={{ padding: "36px 45px" }}>
@@ -99,13 +156,16 @@ export default function StudentDetailPage() {
                 backgroundColor: "#e8e4f0", flexShrink: 0,
                 display: "flex", alignItems: "center", justifyContent: "center",
               }}>
-                <span style={{ fontSize: "30px", fontWeight: 700, color: "var(--color-accent)" }}>{student.initial}</span>
+                <span style={{ fontSize: "30px", fontWeight: 700, color: "var(--color-accent)" }}>{initials}</span>
               </div>
 
               <div style={{ flex: 1 }}>
-                <h1 style={{ fontSize: "26px", fontWeight: 700, color: "var(--color-text-primary)", margin: "0 0 6px" }}>{student.name}</h1>
+                <h1 style={{ fontSize: "26px", fontWeight: 700, color: "var(--color-text-primary)", margin: "0 0 6px" }}>
+                  {student.github_alias}
+                </h1>
                 <p style={{ fontSize: "15px", color: "var(--color-text-subtle)", margin: "0 0 12px" }}>
-                  {student.tg_username}&nbsp;&nbsp;·&nbsp;&nbsp;{student.email}
+                  {student.tg_username && `${student.tg_username}  ·  `}{student.email}
+                  {student.student_group && `  ·  Группа: ${student.student_group}`}
                 </p>
                 <span style={{
                   backgroundColor: statusInfo.bg, border: `1px solid ${statusInfo.border}`,
@@ -115,144 +175,189 @@ export default function StudentDetailPage() {
                   {statusInfo.label}
                 </span>
               </div>
-
-              <Link
-                href={`/dashboard/chat?student=${student.id}`}
-                style={{
-                  display: "inline-flex", alignItems: "center", gap: "8px",
-                  backgroundColor: "var(--color-btn-primary-bg)", color: "var(--color-btn-primary-color)",
-                  textDecoration: "none", borderRadius: "10px",
-                  height: "44px", padding: "0 24px",
-                  fontSize: "15px", fontWeight: 600, flexShrink: 0,
-                }}
-              >
-                <span style={{ fontSize: "18px" }}>💬</span>
-                Написать
-              </Link>
             </div>
 
             {/* Score stats */}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "14px" }}>
-              <div style={{
-                backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)",
-                borderRadius: "12px", padding: "20px 22px",
-              }}>
-                <p style={{ fontSize: "13px", color: "var(--color-text-subtle)", textTransform: "uppercase", fontWeight: 600, letterSpacing: "0.5px", margin: "0 0 10px" }}>
-                  Средний балл
-                </p>
-                <p style={{ fontSize: "36px", fontWeight: 700, color: "var(--color-accent)", margin: 0, lineHeight: 1 }}>
-                  {stats.avg}
-                </p>
-              </div>
-              <div style={{
-                backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)",
-                borderRadius: "12px", padding: "20px 22px",
-              }}>
-                <p style={{ fontSize: "13px", color: "var(--color-text-subtle)", textTransform: "uppercase", fontWeight: 600, letterSpacing: "0.5px", margin: "0 0 10px" }}>
-                  Общий балл
-                </p>
-                <p style={{ fontSize: "36px", fontWeight: 700, color: "var(--color-text-primary)", margin: 0, lineHeight: 1 }}>
-                  {stats.total.toLocaleString("ru")}
-                </p>
-              </div>
-              <div style={{
-                backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)",
-                borderRadius: "12px", padding: "20px 22px",
-              }}>
-                <p style={{ fontSize: "13px", color: "var(--color-text-subtle)", textTransform: "uppercase", fontWeight: 600, letterSpacing: "0.5px", margin: "0 0 10px" }}>
-                  Прогресс
-                </p>
-                <p style={{ fontSize: "36px", fontWeight: 700, color: "var(--color-text-primary)", margin: "0 0 8px", lineHeight: 1 }}>
-                  {progress}%
-                </p>
-                <div style={{ width: "100%", height: "6px", backgroundColor: "var(--color-border)", borderRadius: "3px", overflow: "hidden" }}>
-                  <div style={{ height: "100%", width: `${progress}%`, backgroundColor: progressColor, borderRadius: "3px" }} />
+              {[
+                { label: "Выполнено", value: `${passed} / ${tasks.length}` },
+                { label: "Прогресс", value: `${progress}%`, bar: true },
+                { label: "Последняя сдача", value: tasks.find((t) => t.last_attempt)?.last_attempt || "—" },
+              ].map((card) => (
+                <div key={card.label} style={{
+                  backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)",
+                  borderRadius: "12px", padding: "20px 22px",
+                }}>
+                  <p style={{ fontSize: "13px", color: "var(--color-text-subtle)", textTransform: "uppercase", fontWeight: 600, letterSpacing: "0.5px", margin: "0 0 10px" }}>
+                    {card.label}
+                  </p>
+                  <p style={{ fontSize: "30px", fontWeight: 700, color: "var(--color-accent)", margin: "0 0 8px", lineHeight: 1 }}>
+                    {card.value}
+                  </p>
+                  {card.bar && (
+                    <div style={{ width: "100%", height: "6px", backgroundColor: "var(--color-border)", borderRadius: "3px", overflow: "hidden" }}>
+                      <div style={{ height: "100%", width: `${progress}%`, backgroundColor: progressColor, borderRadius: "3px" }} />
+                    </div>
+                  )}
                 </div>
-              </div>
+              ))}
             </div>
 
-            {/* Assignments with scores */}
-            <div style={{
-              backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)",
-              borderRadius: "14px", overflow: "hidden",
-            }}>
-              <div style={{
-                padding: "18px 24px", borderBottom: "1px solid var(--color-border-card)",
-                backgroundColor: "var(--color-bg-alt)",
+            {/* Tasks grouped by lab */}
+            {Object.entries(labGroups).map(([labId, labTasks]) => (
+              <div key={labId} style={{
+                backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)",
+                borderRadius: "14px", overflow: "hidden",
               }}>
-                <h2 style={{ fontSize: "18px", fontWeight: 600, color: "var(--color-text-primary)", margin: 0 }}>
-                  Задания и оценки
-                </h2>
+                <div style={{
+                  padding: "14px 24px", borderBottom: "1px solid var(--color-border-card)",
+                  backgroundColor: "var(--color-bg-alt)",
+                  display: "flex", alignItems: "center", justifyContent: "space-between",
+                }}>
+                  <h2 style={{ fontSize: "17px", fontWeight: 700, color: "var(--color-text-primary)", margin: 0, textTransform: "uppercase", letterSpacing: "0.5px" }}>
+                    {labId.replace("lab-", "Лаб ")}
+                  </h2>
+                  <span style={{ fontSize: "13px", color: "var(--color-text-subtle)" }}>
+                    {labTasks.filter((t) => t.status === "pass" || t.status === "partial").length} / {labTasks.length} выполнено
+                  </span>
+                </div>
+
+                {/* Table header */}
+                <div style={{
+                  display: "grid", gridTemplateColumns: "1fr 110px 130px 130px 100px",
+                  padding: "8px 24px", borderBottom: "1px solid var(--color-border-card)",
+                  backgroundColor: "var(--color-card-alt)",
+                }}>
+                  {["Задание", "Баллы", "Попыток", "Осталось", "Статус"].map((h) => (
+                    <span key={h} style={{ fontSize: "12px", fontWeight: 600, color: "var(--color-text-subtle)", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+                      {h}
+                    </span>
+                  ))}
+                </div>
+
+                {labTasks.map((t, i) => {
+                  const sc = taskStatusColor(t.status);
+                  return (
+                    <div
+                      key={t.task_id}
+                      style={{
+                        display: "grid", gridTemplateColumns: "1fr 110px 130px 130px 100px",
+                        padding: "14px 24px", alignItems: "center",
+                        borderBottom: i < labTasks.length - 1 ? "1px solid var(--color-border-card)" : "none",
+                      }}
+                    >
+                      <div>
+                        <p style={{ margin: 0, fontSize: "15px", fontWeight: 500, color: "var(--color-text-primary)" }}>{t.title}</p>
+                        {t.last_attempt && (
+                          <p style={{ margin: "2px 0 0", fontSize: "12px", color: "var(--color-text-subtle)" }}>
+                            Последняя: {t.last_attempt}
+                          </p>
+                        )}
+                      </div>
+                      <span style={{ fontSize: "15px", fontWeight: 700, color: "var(--color-accent)" }}>
+                        {t.score !== "—" ? t.score.split("%")[0] + "%" : "—"}
+                      </span>
+                      <span style={{ fontSize: "14px", color: "var(--color-text-muted)" }}>
+                        {t.attempts} / {t.max_attempts}
+                      </span>
+                      <span style={{ fontSize: "14px", color: t.remaining === 0 ? "#e53e3e" : "var(--color-text-muted)" }}>
+                        {t.remaining}
+                      </span>
+                      <span style={{
+                        display: "inline-flex", alignItems: "center",
+                        backgroundColor: sc.bg, borderRadius: "10px", padding: "3px 10px",
+                        fontSize: "12px", fontWeight: 600, color: sc.color, whiteSpace: "nowrap",
+                      }}>
+                        {sc.label}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
+            ))}
 
-              {assignments.length === 0 ? (
-                <p style={{ padding: "32px 24px", color: "var(--color-text-subtle)", fontSize: "15px", textAlign: "center" }}>
-                  Заданий пока нет.
-                </p>
-              ) : (
-                <div>
-                  {/* Header */}
-                  <div style={{
-                    display: "grid", gridTemplateColumns: "1fr 120px 120px",
-                    padding: "10px 24px",
-                    borderBottom: "1px solid var(--color-border-card)",
-                    backgroundColor: "var(--color-card-alt)",
-                  }}>
-                    <span style={{ fontSize: "12px", fontWeight: 600, color: "var(--color-text-subtle)", textTransform: "uppercase", letterSpacing: "0.5px" }}>Задание</span>
-                    <span style={{ fontSize: "12px", fontWeight: 600, color: "var(--color-text-subtle)", textTransform: "uppercase", letterSpacing: "0.5px", textAlign: "center" }}>Дедлайн</span>
-                    <span style={{ fontSize: "12px", fontWeight: 600, color: "var(--color-text-subtle)", textTransform: "uppercase", letterSpacing: "0.5px", textAlign: "center" }}>Балл</span>
-                  </div>
-
-                  {assignments.map((a, i) => {
-                    const score = scores[a.id];
-                    const hasScore = score !== undefined;
-                    return (
+            {/* Recent check history */}
+            {results.length > 0 && (
+              <div style={{
+                backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)",
+                borderRadius: "14px", overflow: "hidden",
+              }}>
+                <div style={{ padding: "16px 24px", borderBottom: "1px solid var(--color-border-card)", backgroundColor: "var(--color-bg-alt)" }}>
+                  <h2 style={{ fontSize: "18px", fontWeight: 600, color: "var(--color-text-primary)", margin: 0 }}>
+                    История проверок
+                  </h2>
+                </div>
+                {results.slice(0, 10).map((r, i) => {
+                  const key = `${r.lab_id}:${r.task_id}:${r.timestamp}`;
+                  const isOpen = expandedResult === key;
+                  const sc = taskStatusColor(r.status);
+                  return (
+                    <div key={key} style={{ borderBottom: i < Math.min(results.length, 10) - 1 ? "1px solid var(--color-border-card)" : "none" }}>
                       <div
-                        key={a.id}
+                        onClick={() => setExpandedResult(isOpen ? null : key)}
                         style={{
-                          display: "grid", gridTemplateColumns: "1fr 120px 120px",
-                          padding: "16px 24px", alignItems: "center",
-                          borderBottom: i < assignments.length - 1 ? "1px solid var(--color-border-card)" : "none",
+                          padding: "14px 24px", cursor: "pointer",
+                          display: "flex", alignItems: "center", gap: "16px",
                         }}
                       >
-                        <div>
-                          <p style={{ margin: 0, fontSize: "15px", fontWeight: 500, color: "var(--color-text-primary)" }}>{a.title}</p>
-                          {a.comment && (
-                            <p style={{ margin: "2px 0 0", fontSize: "12px", color: "var(--color-text-subtle)" }}>{a.comment.slice(0, 60)}{a.comment.length > 60 ? "…" : ""}</p>
-                          )}
+                        <div style={{ flex: 1 }}>
+                          <p style={{ margin: 0, fontSize: "15px", fontWeight: 500, color: "var(--color-text-primary)" }}>
+                            {r.title || `${r.lab_id} / ${r.task_id}`}
+                          </p>
+                          <p style={{ margin: "2px 0 0", fontSize: "12px", color: "var(--color-text-subtle)" }}>
+                            {(r.timestamp || "").slice(0, 16).replace("T", " ")}
+                            {r.total ? `  ·  ${r.passed ?? 0}/${r.total} проверок` : ""}
+                          </p>
                         </div>
-                        <p style={{ margin: 0, fontSize: "14px", color: "var(--color-text-light)", textAlign: "center" }}>
-                          {a.deadline || "—"}
-                        </p>
-                        <div style={{ textAlign: "center" }}>
-                          {hasScore ? (
-                            <span style={{
-                              display: "inline-block",
-                              backgroundColor: score >= 70 ? "#ecfdf5" : score >= 40 ? "#fffbeb" : "#fef2f2",
-                              border: `1px solid ${score >= 70 ? "#b5f5d7" : score >= 40 ? "#fde372" : "#fec7c7"}`,
-                              borderRadius: "10px", padding: "4px 16px",
-                              fontSize: "15px", fontWeight: 700,
-                              color: score >= 70 ? "#0e3e12" : score >= 40 ? "#af3f00" : "#8f0000",
-                            }}>
-                              {score}
-                            </span>
-                          ) : (
-                            <span style={{ fontSize: "14px", color: "var(--color-text-subtle)" }}>—</span>
-                          )}
-                        </div>
+                        <span style={{
+                          backgroundColor: sc.bg, color: sc.color,
+                          borderRadius: "10px", padding: "3px 12px",
+                          fontSize: "13px", fontWeight: 600, flexShrink: 0,
+                        }}>
+                          {r.score || sc.label}
+                        </span>
+                        <span style={{ fontSize: "18px", color: "var(--color-text-subtle)", flexShrink: 0 }}>
+                          {isOpen ? "▲" : "▼"}
+                        </span>
                       </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
+
+                      {isOpen && r.checks && r.checks.length > 0 && (
+                        <div style={{ padding: "0 24px 16px", backgroundColor: "var(--color-card-alt)" }}>
+                          {r.checks.map((c, ci) => (
+                            <div key={ci} style={{
+                              display: "flex", gap: "12px", alignItems: "flex-start",
+                              padding: "8px 0",
+                              borderBottom: ci < r.checks.length - 1 ? "1px solid var(--color-border-card)" : "none",
+                            }}>
+                              <span style={{
+                                fontSize: "13px", fontWeight: 700, flexShrink: 0, marginTop: "1px",
+                                color: c.status === "PASS" ? "#0e3e12" : c.status === "FAIL" ? "#8f0000" : "#af3f00",
+                              }}>
+                                {c.status === "PASS" ? "✓" : c.status === "FAIL" ? "✗" : "!"}
+                              </span>
+                              <div>
+                                <p style={{ margin: 0, fontSize: "13px", color: "var(--color-text-primary)" }}>
+                                  {c.description || c.id}
+                                </p>
+                                {c.details && (
+                                  <p style={{ margin: "2px 0 0", fontSize: "12px", color: "var(--color-text-subtle)", fontFamily: "monospace" }}>
+                                    {c.details}
+                                  </p>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* Right — quick actions */}
-          <div style={{
-            width: "280px", flexShrink: 0,
-            display: "flex", flexDirection: "column", gap: "14px",
-          }}>
+          <div style={{ width: "280px", flexShrink: 0, display: "flex", flexDirection: "column", gap: "14px" }}>
             <div style={{
               backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)",
               borderRadius: "14px", padding: "22px 20px",
@@ -262,7 +367,7 @@ export default function StudentDetailPage() {
               </h3>
               <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
                 <Link
-                  href={`/dashboard/chat?student=${student.id}`}
+                  href={`/dashboard/chat?student=${student.github_alias}`}
                   style={{
                     display: "flex", alignItems: "center", gap: "10px",
                     backgroundColor: "var(--color-btn-primary-bg)", color: "var(--color-btn-primary-color)",
@@ -273,18 +378,20 @@ export default function StudentDetailPage() {
                 >
                   <span>💬</span> Написать в чат
                 </Link>
-                <button
-                  onClick={() => router.push(`/dashboard/students?expand=${student.id}`)}
+                <a
+                  href={`http://localhost:8000/student/${student.github_alias}`}
+                  target="_blank"
+                  rel="noreferrer"
                   style={{
                     display: "flex", alignItems: "center", gap: "10px",
                     backgroundColor: "var(--color-card)", color: "var(--color-accent)",
                     border: "1.5px solid var(--color-accent)", borderRadius: "10px",
                     height: "44px", padding: "0 18px",
-                    fontSize: "15px", fontWeight: 600, cursor: "pointer", width: "100%",
+                    fontSize: "15px", fontWeight: 600, textDecoration: "none",
                   }}
                 >
-                  <span>✏️</span> Изменить баллы
-                </button>
+                  <span>🔗</span> Открыть в дашборде
+                </a>
               </div>
             </div>
 
@@ -292,15 +399,36 @@ export default function StudentDetailPage() {
               backgroundColor: "var(--color-card-alt)", border: "1px solid var(--color-border-card)",
               borderRadius: "14px", padding: "20px",
             }}>
-              <h3 style={{ fontSize: "15px", fontWeight: 600, color: "#0f1d74", margin: "0 0 10px" }}>
+              <h3 style={{ fontSize: "15px", fontWeight: 600, color: "#0f1d74", margin: "0 0 12px" }}>
                 Контакты
               </h3>
-              <p style={{ fontSize: "14px", color: "var(--color-text-muted)", margin: "0 0 6px" }}>
-                <strong>Telegram:</strong> {student.tg_username}
-              </p>
-              <p style={{ fontSize: "14px", color: "var(--color-text-muted)", margin: 0 }}>
-                <strong>Email:</strong> {student.email}
-              </p>
+              <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                {student.email && (
+                  <p style={{ fontSize: "14px", color: "var(--color-text-muted)", margin: 0 }}>
+                    <strong>Email:</strong> {student.email}
+                  </p>
+                )}
+                {student.tg_username && (
+                  <p style={{ fontSize: "14px", color: "var(--color-text-muted)", margin: 0 }}>
+                    <strong>Telegram:</strong> {student.tg_username}
+                  </p>
+                )}
+                {student.github_alias && (
+                  <p style={{ fontSize: "14px", color: "var(--color-text-muted)", margin: 0 }}>
+                    <strong>GitHub:</strong> {student.github_alias}
+                  </p>
+                )}
+                {student.server_ip && (
+                  <p style={{ fontSize: "14px", color: "var(--color-text-muted)", margin: 0 }}>
+                    <strong>Server IP:</strong> {student.server_ip}
+                  </p>
+                )}
+                {student.student_group && (
+                  <p style={{ fontSize: "14px", color: "var(--color-text-muted)", margin: 0 }}>
+                    <strong>Группа:</strong> {student.student_group}
+                  </p>
+                )}
+              </div>
             </div>
           </div>
         </div>

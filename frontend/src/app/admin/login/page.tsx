@@ -2,37 +2,37 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-
-const ADMIN_CREDENTIALS = { email: "admin@autochecker.kz", password: "admin123" };
+import { loginTeacher } from "@/lib/api";
 
 export default function AdminLoginPage() {
   const router = useRouter();
-  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPw, setShowPw] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.SyntheticEvent) {
     e.preventDefault();
     setLoading(true);
     setError("");
-    setTimeout(() => {
-      if (email === ADMIN_CREDENTIALS.email && password === ADMIN_CREDENTIALS.password) {
+    try {
+      const { ok } = await loginTeacher(password);
+      if (ok) {
         localStorage.setItem("admin_logged_in", "true");
+        sessionStorage.setItem("user_role", "teacher");
         router.push("/admin");
       } else {
-        setError("Неверный email или пароль.");
+        setError("Неверный пароль.");
       }
+    } catch {
+      setError("Ошибка подключения к серверу.");
+    } finally {
       setLoading(false);
-    }, 500);
+    }
   }
 
   return (
-    <div style={{
-      minHeight: "100vh", backgroundColor: "#f3f5fa",
-      display: "flex", flexDirection: "column",
-    }}>
+    <div style={{ minHeight: "100vh", backgroundColor: "#f3f5fa", display: "flex", flexDirection: "column" }}>
       {/* Header */}
       <header style={{
         backgroundColor: "#fdfeff", height: "66px",
@@ -44,11 +44,10 @@ export default function AdminLoginPage() {
         </span>
       </header>
 
-      {/* Card */}
       <main style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
         <div style={{
           backgroundColor: "white", border: "1px solid #f1f0f1",
-          borderRadius: "14px", width: "460px",
+          borderRadius: "14px", width: "440px",
           padding: "40px 44px",
           boxShadow: "0 4px 24px rgba(0,0,0,0.07)",
         }}>
@@ -68,46 +67,14 @@ export default function AdminLoginPage() {
             </p>
           </div>
 
-          {/* Demo hint */}
-          <div style={{
-            backgroundColor: "#f0f0ff", border: "1px solid #d2d0ff",
-            borderRadius: "10px", padding: "12px 16px",
-            fontSize: "13px", color: "#3525cd", marginBottom: "22px",
-          }}>
-            <p style={{ fontWeight: 700, margin: "0 0 4px" }}>Тестовые данные:</p>
-            <p style={{ margin: 0 }}>
-              📧 <span style={{ fontFamily: "monospace" }}>admin@autochecker.kz</span>
-            </p>
-            <p style={{ margin: 0 }}>
-              🔑 <span style={{ fontFamily: "monospace" }}>admin123</span>
-            </p>
-          </div>
-
           <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: "18px" }}>
-            {/* Email */}
             <div>
-              <label style={{ fontSize: "13px", fontWeight: 600, color: "#5b6475", textTransform: "uppercase", letterSpacing: "0.5px", display: "block", marginBottom: "8px" }}>
-                Email
-              </label>
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="admin@autochecker.kz"
-                required
-                style={{
-                  width: "100%", height: "52px",
-                  border: "1.5px solid #dfdde8", borderRadius: "12px",
-                  padding: "0 16px", fontSize: "16px", color: "#333",
-                  outline: "none", boxSizing: "border-box",
-                }}
-              />
-            </div>
-
-            {/* Password */}
-            <div>
-              <label style={{ fontSize: "13px", fontWeight: 600, color: "#5b6475", textTransform: "uppercase", letterSpacing: "0.5px", display: "block", marginBottom: "8px" }}>
-                Пароль
+              <label style={{
+                fontSize: "13px", fontWeight: 600, color: "#5b6475",
+                textTransform: "uppercase", letterSpacing: "0.5px",
+                display: "block", marginBottom: "8px",
+              }}>
+                Пароль дашборда
               </label>
               <div style={{
                 display: "flex", alignItems: "center",
@@ -117,7 +84,7 @@ export default function AdminLoginPage() {
                   type={showPw ? "text" : "password"}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
+                  placeholder="DASHBOARD_PASSWORD"
                   required
                   style={{
                     flex: 1, height: "52px",
@@ -129,14 +96,14 @@ export default function AdminLoginPage() {
                 <button
                   type="button"
                   onClick={() => setShowPw(!showPw)}
-                  style={{
-                    background: "none", border: "none", cursor: "pointer",
-                    padding: "0 14px", fontSize: "17px", opacity: 0.5,
-                  }}
+                  style={{ background: "none", border: "none", cursor: "pointer", padding: "0 14px", fontSize: "17px", opacity: 0.5 }}
                 >
                   {showPw ? "🙈" : "👁"}
                 </button>
               </div>
+              <p style={{ fontSize: "12px", color: "#aaa", margin: "6px 0 0" }}>
+                Тот же пароль что в <code>DASHBOARD_PASSWORD</code> (.env)
+              </p>
             </div>
 
             {error && (
@@ -147,13 +114,14 @@ export default function AdminLoginPage() {
 
             <button
               type="submit"
-              disabled={loading}
+              disabled={loading || !password}
               style={{
                 width: "100%", height: "54px",
                 backgroundColor: "#142175", color: "white",
                 border: "none", borderRadius: "12px",
-                fontSize: "16px", fontWeight: 600, cursor: loading ? "not-allowed" : "pointer",
-                opacity: loading ? 0.7 : 1,
+                fontSize: "16px", fontWeight: 600,
+                cursor: loading || !password ? "not-allowed" : "pointer",
+                opacity: loading || !password ? 0.6 : 1,
                 marginTop: "4px",
               }}
             >

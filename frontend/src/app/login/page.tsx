@@ -4,6 +4,29 @@ import { useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
+import { loginTeacher, loginStudent } from "@/lib/api";
+
+// Demo accounts — замени email/password на реальные из твоей базы и .env
+const DEMO_ACCOUNTS = [
+  {
+    role: "teacher" as const,
+    label: "👨‍🏫 Учитель",
+    email: "nurasyl@autochecker.kz",   // ← email учителя (любой, просто для поля)
+    password: "teacher123",             // ← значение DASHBOARD_PASSWORD из .env
+  },
+  {
+    role: "student" as const,
+    label: "👨‍🎓 Студент 1",
+    email: "student1@autochecker.kz",  // ← реальный email из bot.db → users.email
+    password: "",
+  },
+  {
+    role: "student" as const,
+    label: "👩‍🎓 Студент 2",
+    email: "student2@autochecker.kz",  // ← реальный email из bot.db → users.email
+    password: "",
+  },
+];
 
 export default function LoginPage() {
   const [role, setRole] = useState<"student" | "teacher">("student");
@@ -14,53 +37,41 @@ export default function LoginPage() {
   const [error, setError] = useState("");
   const router = useRouter();
 
-  // Demo credentials
-  const DEMO_TEACHER = { email: "nurasyl@autochecker.kz", password: "teacher123", id: "teacher_nurasyl", name: "Нурасыл М." };
-  const DEMO_STUDENT = { email: "muhammad@autochecker.kz", password: "student123", id: "3", name: "Мухаммад Шералхан" };
-
-  async function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.SyntheticEvent) {
     e.preventDefault();
     setLoading(true);
     setError("");
 
     try {
-      // ── Demo login (no backend needed) ──────────────────────────────────────
-      if (role === "teacher" && email === DEMO_TEACHER.email && password === DEMO_TEACHER.password) {
-        sessionStorage.setItem("user_role", "teacher");
-        sessionStorage.setItem("user_id", DEMO_TEACHER.id);
-        sessionStorage.setItem("user_name", DEMO_TEACHER.name);
-        router.push("/dashboard");
-        return;
-      }
-      if (role === "student" && email === DEMO_STUDENT.email && password === DEMO_STUDENT.password) {
-        sessionStorage.setItem("user_role", "student");
-        sessionStorage.setItem("user_id", DEMO_STUDENT.id);
-        sessionStorage.setItem("user_name", DEMO_STUDENT.name);
-        router.push("/dashboard");
-        return;
-      }
-
-      // ── Real backend login ───────────────────────────────────────────────────
-      const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
       if (role === "teacher") {
-        const form = new FormData();
-        form.append("password", password);
-        const res = await fetch(`${BASE}/login`, {
-          method: "POST",
-          body: form,
-          redirect: "manual",
-          credentials: "include",
-        });
-        if (res.status === 302 || res.ok) {
+        const { ok } = await loginTeacher(password);
+        if (ok) {
           sessionStorage.setItem("user_role", "teacher");
+          sessionStorage.setItem("user_email", email);
           router.push("/dashboard");
         } else {
           setError("Неверный пароль. Попробуйте снова.");
         }
       } else {
-        sessionStorage.setItem("user_role", "student");
-        router.push("/dashboard");
+        // Student: validate email against Telegram-registered users
+        const res = await loginStudent(email);
+        if (res.ok) {
+          const data = await res.json();
+          sessionStorage.setItem("user_role", "student");
+          sessionStorage.setItem("user_email", data.email);
+          sessionStorage.setItem("user_id", data.github_alias || String(data.tg_id));
+          sessionStorage.setItem(
+            "user_name",
+            data.tg_username || data.github_alias || data.email
+          );
+          router.push("/dashboard");
+        } else if (res.status === 404) {
+          setError(
+            "Email не найден. Сначала зарегистрируйтесь через Telegram бот."
+          );
+        } else {
+          setError("Ошибка авторизации. Попробуйте снова.");
+        }
       }
     } catch {
       setError("Ошибка подключения к серверу.");
@@ -153,78 +164,76 @@ export default function LoginPage() {
               </div>
             </div>
 
-            {/* Password */}
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <p className="text-[14px] font-semibold text-[#5b6475] uppercase tracking-wide">
-                  Пароль
-                </p>
-                <button
-                  type="button"
-                  className="text-[16.5px] text-[#0500ce] hover:underline"
-                  tabIndex={-1}
-                >
-                  Забыли пароль?
-                </button>
-              </div>
-              <div className="flex items-center bg-white border border-[#dfdde8] rounded-[12px] h-[60px] px-4 gap-3 focus-within:border-[#3525cd] focus-within:ring-2 focus-within:ring-[#3525cd]/10 transition-all">
-                <Image
-                  src="/assets/icons/lock-icon.png"
-                  alt=""
-                  width={24}
-                  height={24}
-                  className="object-contain opacity-60"
-                />
-                <input
-                  type={showPassword ? "text" : "password"}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••••"
-                  required
-                  className="flex-1 outline-none text-[17px] text-[#333] placeholder-[#6a7280] bg-transparent"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="opacity-50 hover:opacity-100 transition-opacity"
-                >
+            {/* Password — only for teacher */}
+            {role === "teacher" && (
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-[14px] font-semibold text-[#5b6475] uppercase tracking-wide">
+                    Пароль
+                  </p>
+                </div>
+                <div className="flex items-center bg-white border border-[#dfdde8] rounded-[12px] h-[60px] px-4 gap-3 focus-within:border-[#3525cd] focus-within:ring-2 focus-within:ring-[#3525cd]/10 transition-all">
                   <Image
-                    src="/assets/icons/eye-icon.png"
-                    alt="Показать"
+                    src="/assets/icons/lock-icon.png"
+                    alt=""
                     width={24}
                     height={24}
-                    className="object-contain"
+                    className="object-contain opacity-60"
                   />
-                </button>
+                  <input
+                    type={showPassword ? "text" : "password"}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••••"
+                    required
+                    className="flex-1 outline-none text-[17px] text-[#333] placeholder-[#6a7280] bg-transparent"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="opacity-50 hover:opacity-100 transition-opacity"
+                  >
+                    <Image
+                      src="/assets/icons/eye-icon.png"
+                      alt="Показать"
+                      width={24}
+                      height={24}
+                      className="object-contain"
+                    />
+                  </button>
+                </div>
               </div>
-            </div>
+            )}
 
-            {/* Quick-fill demo buttons */}
-            <div className="bg-[#f0f0ff] border border-[#d2d0ff] rounded-[10px] p-3">
-              <p className="text-[13px] font-semibold text-[#3525cd] mb-2">Быстрый вход (для теста):</p>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => { setRole("teacher"); setEmail(DEMO_TEACHER.email); setPassword(DEMO_TEACHER.password); }}
-                  className="flex-1 flex items-center justify-center gap-2 h-[38px] bg-white border border-[#c5caff] rounded-[9px] text-[13px] text-[#3525cd] font-semibold hover:bg-[#eef0ff] transition-colors"
-                >
-                  👨‍🏫 Нурасыл М.
-                </button>
-                <button
-                  type="button"
-                  onClick={() => { setRole("student"); setEmail(DEMO_STUDENT.email); setPassword(DEMO_STUDENT.password); }}
-                  className="flex-1 flex items-center justify-center gap-2 h-[38px] bg-white border border-[#c5caff] rounded-[9px] text-[13px] text-[#3525cd] font-semibold hover:bg-[#eef0ff] transition-colors"
-                >
-                  👨‍🎓 Мухаммад Ш.
-                </button>
+            {role === "student" && (
+              <div className="bg-[#f0f7ff] border border-[#c8deff] rounded-[10px] p-3">
+                <p className="text-[13px] text-[#1a4fa3]">
+                  Студенты входят по email, использованному при регистрации в Telegram боте. Пароль не нужен.
+                </p>
               </div>
-              <button
-                type="button"
-                onClick={() => { router.push("/admin/login"); }}
-                className="w-full flex items-center justify-center gap-2 h-[38px] bg-white border border-[#c5caff] rounded-[9px] text-[13px] text-[#3525cd] font-semibold hover:bg-[#eef0ff] transition-colors mt-2"
-              >
-                🛡 Войти как администратор
-              </button>
+            )}
+
+            {/* Demo accounts */}
+            <div className="bg-[#f5f4ff] border border-[#d2d0ff] rounded-[10px] p-3">
+              <p className="text-[12px] font-semibold text-[#3525cd] uppercase tracking-wide mb-2">
+                Быстрый вход для теста
+              </p>
+              <div className="flex gap-2">
+                {DEMO_ACCOUNTS.map((acc) => (
+                  <button
+                    key={acc.email}
+                    type="button"
+                    onClick={() => {
+                      setRole(acc.role);
+                      setEmail(acc.email);
+                      setPassword(acc.password);
+                    }}
+                    className="flex-1 h-[36px] bg-white border border-[#c5caff] rounded-[8px] text-[12px] text-[#3525cd] font-semibold hover:bg-[#eef0ff] transition-colors"
+                  >
+                    {acc.label}
+                  </button>
+                ))}
+              </div>
             </div>
 
             {/* Error */}
@@ -242,34 +251,14 @@ export default function LoginPage() {
             </button>
           </form>
 
-          {/* Divider */}
-          <div className="flex items-center gap-4 my-6">
-            <div className="flex-1 h-px bg-[#e5e7eb]" />
-            <span className="text-[17px] text-[#3f3f3f]">или продолжить с</span>
-            <div className="flex-1 h-px bg-[#e5e7eb]" />
-          </div>
-
-          {/* Social */}
-          <div className="flex gap-4">
-            <button className="flex-1 flex items-center justify-center gap-3 h-[54px] bg-white border border-[#eae9f0] rounded-[13px] text-[17.5px] text-black hover:bg-gray-50 transition-colors">
-              <Image
-                src="/assets/icons/google-icon.png"
-                alt="Google"
-                width={26}
-                height={26}
-                className="object-contain"
-              />
-              Google
-            </button>
-            <button className="flex-1 flex items-center justify-center gap-3 h-[54px] bg-white border border-[#eae9f0] rounded-[13px] text-[17.5px] text-black hover:bg-gray-50 transition-colors">
-              <Image
-                src="/assets/icons/github-icon.png"
-                alt="GitHub"
-                width={26}
-                height={26}
-                className="object-contain"
-              />
-              GitHub
+          {/* Admin link */}
+          <div className="mt-5 text-center">
+            <button
+              type="button"
+              onClick={() => router.push("/admin/login")}
+              className="text-[14px] text-[#888] hover:text-[#3525cd] transition-colors"
+            >
+              Войти как администратор
             </button>
           </div>
         </div>
@@ -281,7 +270,6 @@ export default function LoginPage() {
         <div className="flex gap-8">
           <a href="#" className="hover:text-[#3525cd] transition-colors">Политика конфиденциальности</a>
           <a href="#" className="hover:text-[#3525cd] transition-colors">Условия использования</a>
-          <a href="#" className="hover:text-[#3525cd] transition-colors">Центр помощи</a>
         </div>
       </footer>
     </div>
