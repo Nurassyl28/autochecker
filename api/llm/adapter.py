@@ -29,6 +29,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
 
     def __init__(self):
         import httpx
+        # client is module-level singleton — closed on app shutdown via lifespan
         self._client = httpx.AsyncClient(timeout=120)
         self._base = (LLM_BASE_URL or "https://api.openai.com/v1").rstrip("/")
         self._model = LLM_MODEL

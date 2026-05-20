@@ -184,4 +184,4 @@ async def _fail(submission_id: int, reason: str, tg_id: int | None = None) -> No
 async def _run_sync(fn, *args):
     """Run a sync blocking function in a thread pool."""
     import asyncio
-    return await asyncio.get_event_loop().run_in_executor(None, fn, *args)
+    return await asyncio.get_running_loop().run_in_executor(None, fn, *args)

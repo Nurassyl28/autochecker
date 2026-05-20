@@ -42,7 +42,7 @@ async def list_conversations(user: dict = Depends(require_any)):
 async def get_messages(
     other_user_id: int,
     limit: int = 50,
-    before_id: int = None,
+    before_id: int | None = None,
     user: dict = Depends(require_any),
 ):
     """Get message history between current user and other_user_id."""

@@ -18,6 +18,10 @@ async def lifespan(app: FastAPI):
     await db.init_pool()
     yield
     await db.close_pool()
+    # Close LLM HTTP client if it was created
+    from .llm.adapter import _adapter
+    if _adapter and hasattr(_adapter, "_client"):
+        await _adapter._client.aclose()
 
 
 app = FastAPI(title="Autochecker API v2", version="2.0.0", lifespan=lifespan)
