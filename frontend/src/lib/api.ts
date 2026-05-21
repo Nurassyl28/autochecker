@@ -1,175 +1,199 @@
 /**
- * API client for Autochecker backend (FastAPI)
- * Base URL is set via NEXT_PUBLIC_API_URL in .env.local
+ * API client for Autochecker v2 backend (FastAPI + PostgreSQL + JWT)
+ * Base URL: NEXT_PUBLIC_API_URL in .env.local
  */
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-// ─── Auth ─────────────────────────────────────────────────────────────────────
+// ── JWT token management ──────────────────────────────────────────────────────
 
-export async function loginTeacher(password: string): Promise<{ ok: boolean }> {
+export function getToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return sessionStorage.getItem("auth_token") || localStorage.getItem("auth_token");
+}
+
+export function setToken(token: string): void {
+  sessionStorage.setItem("auth_token", token);
+  localStorage.setItem("auth_token", token);
+}
+
+function authHeaders(extra: Record<string, string> = {}): HeadersInit {
+  const token = getToken();
+  const base: Record<string, string> = { "Content-Type": "application/json", ...extra };
+  if (token) base["Authorization"] = `Bearer ${token}`;
+  return base;
+}
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+
+export interface LoginResult {
+  ok: boolean;
+  role?: string;
+  user_id?: number;
+  full_name?: string;
+  university_id?: number;
+  error?: string;
+}
+
+export async function login(email: string, password: string): Promise<LoginResult> {
   try {
-    const res = await fetch(`${BASE_URL}/api/auth/teacher`, {
+    const res = await fetch(`${BASE_URL}/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password }),
-      credentials: "include",
+      body: JSON.stringify({ email, password }),
     });
-    return { ok: res.ok };
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      return { ok: false, error: (err as { detail?: string }).detail || "Ошибка авторизации" };
+    }
+    const data = await res.json();
+    setToken(data.access_token);
+    return {
+      ok: true,
+      role: data.role,
+      user_id: data.user_id,
+      full_name: data.full_name,
+      university_id: data.university_id,
+    };
   } catch {
-    return { ok: false };
+    return { ok: false, error: "Ошибка подключения к серверу" };
   }
 }
 
-export async function loginStudent(email: string): Promise<Response> {
-  return fetch(`${BASE_URL}/api/auth/student`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email }),
-  });
-}
-
-export function logout() {
-  document.cookie = "dash_auth=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
+export function logout(): void {
   sessionStorage.clear();
+  localStorage.removeItem("auth_token");
 }
 
-// ─── Students (teacher) ───────────────────────────────────────────────────────
+// ── Teacher endpoints ─────────────────────────────────────────────────────────
 
 export async function getStudents(): Promise<Response> {
-  return fetch(`${BASE_URL}/api/students`, { credentials: "include" });
+  return fetch(`${BASE_URL}/teacher/students`, { headers: authHeaders() });
 }
 
-export async function getStudentDetails(github_alias: string): Promise<Response> {
-  return fetch(`${BASE_URL}/api/student/${github_alias}/details`, {
-    credentials: "include",
-  });
+export async function getStudentDetails(studentId: string | number): Promise<Response> {
+  return fetch(`${BASE_URL}/teacher/students/${studentId}`, { headers: authHeaders() });
 }
 
-export async function editStudent(
-  github_alias: string,
-  data: {
-    email: string;
-    github_alias: string;
-    tg_username?: string;
-    server_ip?: string;
-    vm_username?: string;
-  }
-): Promise<Response> {
-  const form = new FormData();
-  form.append("email", data.email);
-  form.append("github_alias", data.github_alias);
-  form.append("tg_username", data.tg_username ?? "");
-  form.append("server_ip", data.server_ip ?? "");
-  form.append("vm_username", data.vm_username ?? "");
-  return fetch(`${BASE_URL}/student/${github_alias}/edit`, {
-    method: "POST",
-    body: form,
-    credentials: "include",
-  });
+export async function getTeacherSubmissions(assignmentId?: number): Promise<Response> {
+  const url = assignmentId
+    ? `${BASE_URL}/teacher/submissions?assignment_id=${assignmentId}`
+    : `${BASE_URL}/teacher/submissions`;
+  return fetch(url, { headers: authHeaders() });
 }
 
-export async function freeAttempts(
-  github_alias: string,
-  lab_id: string,
-  task_id: string,
-  amount: number = 0
-): Promise<Response> {
-  const form = new FormData();
-  form.append("lab_id", lab_id);
-  form.append("task_id", task_id);
-  form.append("amount", String(amount));
-  return fetch(`${BASE_URL}/student/${github_alias}/attempts/free`, {
-    method: "POST",
-    body: form,
-    credentials: "include",
-  });
+export async function getTeacherAssignments(): Promise<Response> {
+  return fetch(`${BASE_URL}/teacher/assignments`, { headers: authHeaders() });
 }
 
-export async function markDone(
-  github_alias: string,
-  lab_id: string,
-  task_id: string
-): Promise<Response> {
-  const form = new FormData();
-  form.append("lab_id", lab_id);
-  form.append("task_id", task_id);
-  return fetch(`${BASE_URL}/student/${github_alias}/mark-done`, {
-    method: "POST",
-    body: form,
-    credentials: "include",
-  });
-}
-
-export async function revertDone(
-  github_alias: string,
-  lab_id: string,
-  task_id: string
-): Promise<Response> {
-  const form = new FormData();
-  form.append("lab_id", lab_id);
-  form.append("task_id", task_id);
-  return fetch(`${BASE_URL}/student/${github_alias}/revert-done`, {
-    method: "POST",
-    body: form,
-    credentials: "include",
-  });
-}
-
-// ─── Student self-data ────────────────────────────────────────────────────────
-
-export async function getMyData(email: string): Promise<Response> {
-  return fetch(`${BASE_URL}/api/me?email=${encodeURIComponent(email)}`);
-}
-
-// ─── Dashboard stats ──────────────────────────────────────────────────────────
-
+// Stats are computed locally from the students list — no separate /stats endpoint in v2
 export async function getDashboardStats(): Promise<Response> {
-  return fetch(`${BASE_URL}/api/stats`, { credentials: "include" });
+  return fetch(`${BASE_URL}/teacher/students`, { headers: authHeaders() });
 }
 
-export async function getTop10(): Promise<Response> {
-  return fetch(`${BASE_URL}/api/top10`, { credentials: "include" });
+// ── Student endpoints ─────────────────────────────────────────────────────────
+
+export async function getStudentAssignments(): Promise<Response> {
+  return fetch(`${BASE_URL}/student/assignments`, { headers: authHeaders() });
 }
 
-// ─── Labs / Tasks ──────────────────────────────────────────────────────────────
+export async function getStudentSubmissions(): Promise<Response> {
+  return fetch(`${BASE_URL}/student/submissions`, { headers: authHeaders() });
+}
 
-export async function getItems(
-  email: string,
-  password: string
-): Promise<Response> {
-  const creds = btoa(`${email}:${password}`);
-  return fetch(`${BASE_URL}/api/items`, {
-    headers: { Authorization: `Basic ${creds}` },
+/** Returns both assignments and submissions in parallel for the student dashboard. */
+export async function getMyData(): Promise<{ assignments: unknown[]; submissions: unknown[] }> {
+  const [aRes, sRes] = await Promise.all([
+    fetch(`${BASE_URL}/student/assignments`, { headers: authHeaders() }),
+    fetch(`${BASE_URL}/student/submissions`, { headers: authHeaders() }),
+  ]);
+  const [assignments, submissions] = await Promise.all([
+    aRes.ok ? aRes.json() : [],
+    sRes.ok ? sRes.json() : [],
+  ]);
+  return { assignments, submissions };
+}
+
+export async function submitRepo(assignmentId: number, repoUrl: string): Promise<Response> {
+  return fetch(`${BASE_URL}/student/submit`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ assignment_id: assignmentId, repo_url: repoUrl }),
   });
 }
 
-// ─── Logs ─────────────────────────────────────────────────────────────────────
+export async function getSubmissionDetail(submissionId: number): Promise<Response> {
+  return fetch(`${BASE_URL}/student/submissions/${submissionId}`, { headers: authHeaders() });
+}
 
-export async function getLogs(
-  email: string,
-  password: string,
-  since?: string,
-  limit: number = 500
+export async function askLlm(submissionId: number, question: string): Promise<Response> {
+  return fetch(`${BASE_URL}/student/submissions/${submissionId}/ask`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ question }),
+  });
+}
+
+// ── Chat ──────────────────────────────────────────────────────────────────────
+
+export async function getChatConversations(): Promise<Response> {
+  return fetch(`${BASE_URL}/chat/conversations`, { headers: authHeaders() });
+}
+
+export async function getChatMessages(
+  otherUserId: number,
+  limit = 50,
+  beforeId?: number
 ): Promise<Response> {
-  const creds = btoa(`${email}:${password}`);
   const params = new URLSearchParams({ limit: String(limit) });
-  if (since) params.set("since", since);
-  return fetch(`${BASE_URL}/api/logs?${params}`, {
-    headers: { Authorization: `Basic ${creds}` },
+  if (beforeId != null) params.set("before_id", String(beforeId));
+  return fetch(`${BASE_URL}/chat/${otherUserId}?${params}`, { headers: authHeaders() });
+}
+
+export async function sendChatMessage(otherUserId: number, body: string): Promise<Response> {
+  return fetch(`${BASE_URL}/chat/${otherUserId}`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ body }),
   });
 }
 
-// ─── Export ───────────────────────────────────────────────────────────────────
+// ── Admin ─────────────────────────────────────────────────────────────────────
 
-export function exportCsvUrl(lab?: string): string {
-  return lab ? `${BASE_URL}/export/csv?lab=${lab}` : `${BASE_URL}/export/csv`;
+export async function adminGetUsers(): Promise<Response> {
+  return fetch(`${BASE_URL}/admin/users`, { headers: authHeaders() });
 }
 
-// ─── Relay status ─────────────────────────────────────────────────────────────
-
-export async function getRelayStatus(relayToken: string): Promise<Response> {
-  return fetch(`${BASE_URL}/relay/status`, {
-    headers: { Authorization: `Bearer ${relayToken}` },
+export async function adminCreateUser(data: {
+  email: string;
+  password: string;
+  full_name: string;
+  role: "teacher" | "student";
+}): Promise<Response> {
+  return fetch(`${BASE_URL}/admin/users`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify(data),
   });
+}
+
+export async function adminDeleteUser(userId: number): Promise<Response> {
+  return fetch(`${BASE_URL}/admin/users/${userId}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+}
+
+export async function adminGetAssignments(): Promise<Response> {
+  return fetch(`${BASE_URL}/admin/assignments`, { headers: authHeaders() });
+}
+
+export async function adminCreateAssignment(data: FormData): Promise<Response> {
+  const token = getToken();
+  const headers: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {};
+  return fetch(`${BASE_URL}/admin/assignments`, { method: "POST", headers, body: data });
+}
+
+export function exportCsvUrl(): string {
+  return `${BASE_URL}/admin/export/csv`;
 }

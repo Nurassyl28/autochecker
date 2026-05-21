@@ -5,32 +5,33 @@ import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { getStudents } from "@/lib/api";
 
+// v2 API returns: {id, university_id, email, role, full_name, tg_id, created_at}
 interface StudentRow {
-  tg_id: number;
-  github_alias: string;
-  tg_username: string;
+  id: number;
   email: string;
-  student_group: string;
-  last_submission: string;
-  progress: number;
-  avg_score: number;
-  passed_tasks: number;
-  total_tasks: number;
-  total_attempts: number;
+  full_name: string | null;
+  tg_id: number | null;
+  created_at: string;
+  // Computed from submissions (not in list API — defaults shown)
+  progress?: number;
+  avg_score?: number;
+  passed_tasks?: number;
+  total_tasks?: number;
 }
 
 type StudentStatus = "active" | "stuck" | "needs_help";
 
 function getStatus(s: StudentRow): StudentStatus {
-  if (s.progress >= 70) return "active";
-  if (s.progress >= 30) return "needs_help";
+  const p = s.progress ?? 0;
+  if (p >= 70) return "active";
+  if (p >= 30) return "needs_help";
   return "stuck";
 }
 
 const STATUS_LABELS: Record<StudentStatus, { label: string; bg: string; border: string; color: string }> = {
-  active:      { label: "Активен",       bg: "#ecfdf5", border: "#b5f5d7", color: "#0e3e12" },
-  stuck:       { label: "В стопоре",     bg: "#fef2f2", border: "#fec7c7", color: "#8f0000" },
-  needs_help:  { label: "Нужна помощь",  bg: "#fffbeb", border: "#fde372", color: "#af3f00" },
+  active:     { label: "Активен",       bg: "#ecfdf5", border: "#b5f5d7", color: "#0e3e12" },
+  stuck:      { label: "В стопоре",     bg: "#fef2f2", border: "#fec7c7", color: "#8f0000" },
+  needs_help: { label: "Нужна помощь",  bg: "#fffbeb", border: "#fde372", color: "#af3f00" },
 };
 
 export default function StudentsPage() {
@@ -50,11 +51,13 @@ export default function StudentsPage() {
 
   useEffect(() => { loadStudents(); }, [loadStudents]);
 
+  const displayName = (s: StudentRow) => s.full_name || s.email.split("@")[0];
+
   const filtered = students.filter((s) => {
+    const name = displayName(s).toLowerCase();
     const matchSearch =
-      s.github_alias.toLowerCase().includes(search.toLowerCase()) ||
-      s.email.toLowerCase().includes(search.toLowerCase()) ||
-      (s.tg_username || "").toLowerCase().includes(search.toLowerCase());
+      name.includes(search.toLowerCase()) ||
+      s.email.toLowerCase().includes(search.toLowerCase());
     const status = getStatus(s);
     const matchFilter = filter === "all" || status === filter;
     return matchSearch && matchFilter;
@@ -172,7 +175,7 @@ export default function StudentsPage() {
                 textAlign: "center", color: "var(--color-text-subtle)", fontSize: "16px",
               }}>
                 {students.length === 0
-                  ? "Студентов пока нет. Они регистрируются через Telegram бот."
+                  ? "Студентов пока нет. Администратор должен добавить их в систему."
                   : "Студенты не найдены."}
               </div>
             )}
@@ -180,14 +183,15 @@ export default function StudentsPage() {
             {filtered.map((s) => {
               const status = getStatus(s);
               const statusInfo = STATUS_LABELS[status];
+              const progress = s.progress ?? 0;
               const progressColor =
                 status === "active" ? "var(--color-progress-active)" :
                 status === "stuck"  ? "#ba1a1a" : "#f59e0b";
-              const initials = (s.github_alias || s.email).slice(0, 2).toUpperCase();
+              const initials = displayName(s).slice(0, 2).toUpperCase();
 
               return (
                 <div
-                  key={s.tg_id}
+                  key={s.id}
                   style={{
                     backgroundColor: "var(--color-card)",
                     border: `1px solid ${status === "stuck" ? "#efcbca" : "var(--color-border-card)"}`,
@@ -197,7 +201,7 @@ export default function StudentsPage() {
                   <div style={{ padding: "0 22px", height: "96px", display: "flex", alignItems: "center", gap: "20px" }}>
                     {/* Avatar + Name */}
                     <div
-                      onClick={() => router.push(`/dashboard/students/${s.github_alias}`)}
+                      onClick={() => router.push(`/dashboard/students/${s.id}`)}
                       style={{ display: "flex", alignItems: "center", gap: "14px", cursor: "pointer", flexShrink: 0 }}
                     >
                       <div style={{
@@ -215,10 +219,10 @@ export default function StudentsPage() {
                           onMouseEnter={(e) => (e.currentTarget.style.textDecorationColor = "var(--color-accent)")}
                           onMouseLeave={(e) => (e.currentTarget.style.textDecorationColor = "transparent")}
                         >
-                          {s.github_alias || s.email.split("@")[0]}
+                          {displayName(s)}
                         </p>
                         <span style={{ fontSize: "13px", color: "var(--color-text-subtle)" }}>
-                          {s.tg_username || s.email}
+                          {s.email}
                         </span>
                       </div>
                     </div>
@@ -230,11 +234,11 @@ export default function StudentsPage() {
                       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "6px" }}>
                         <span style={{ fontSize: "13px", color: "var(--color-text-light)" }}>Прогресс</span>
                         <span style={{ fontSize: "13px", fontWeight: 600, color: status === "active" ? "var(--color-accent)" : "var(--color-text-muted)" }}>
-                          {s.progress}%
+                          {progress}%
                         </span>
                       </div>
                       <div style={{ width: "100%", height: "7px", backgroundColor: "var(--color-border)", borderRadius: "3.5px", overflow: "hidden" }}>
-                        <div style={{ height: "100%", width: `${s.progress}%`, backgroundColor: progressColor, borderRadius: "3.5px" }} />
+                        <div style={{ height: "100%", width: `${progress}%`, backgroundColor: progressColor, borderRadius: "3.5px" }} />
                       </div>
                     </div>
 
@@ -244,7 +248,7 @@ export default function StudentsPage() {
                     <div style={{ flex: 1 }}>
                       <p style={{ fontSize: "13px", color: "var(--color-text-light)", margin: "0 0 4px" }}>Выполнено / Средний балл</p>
                       <p style={{ fontSize: "20px", fontWeight: 700, color: "var(--color-text-primary)", margin: 0 }}>
-                        {s.passed_tasks}/{s.total_tasks}&nbsp;&nbsp;·&nbsp;&nbsp;{s.avg_score}%
+                        {s.passed_tasks ?? 0}/{s.total_tasks ?? 0}&nbsp;&nbsp;·&nbsp;&nbsp;{s.avg_score ?? 0}%
                       </p>
                     </div>
 
@@ -263,7 +267,7 @@ export default function StudentsPage() {
 
                     {/* Detail link */}
                     <button
-                      onClick={() => router.push(`/dashboard/students/${s.github_alias}`)}
+                      onClick={() => router.push(`/dashboard/students/${s.id}`)}
                       style={{
                         backgroundColor: "var(--color-btn-primary-bg)", color: "var(--color-btn-primary-color)",
                         border: "none", borderRadius: "8px", height: "36px", padding: "0 18px",

@@ -1,7 +1,16 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getTop10 } from "@/lib/api";
+import { getStudents } from "@/lib/api";
+
+// v2 student from teacher list — no leaderboard endpoint yet
+interface StudentRow {
+  id: number;
+  email: string;
+  full_name: string | null;
+  avg_score?: number;
+  passed_tasks?: number;
+}
 
 interface LeaderEntry {
   rank: number;
@@ -10,7 +19,7 @@ interface LeaderEntry {
   initials: string;
   points: number;
   solved: number;
-  github_alias: string;
+  id: number;
   trend: string;
 }
 
@@ -30,9 +39,32 @@ export default function Top10Page() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    getTop10()
+    getStudents()
       .then((r) => (r.ok ? r.json() : []))
-      .then((data: LeaderEntry[]) => setLeaderboard(Array.isArray(data) ? data : []))
+      .then((data: StudentRow[]) => {
+        if (!Array.isArray(data)) return;
+        const entries: LeaderEntry[] = data
+          .sort((a, b) => (b.avg_score ?? 0) - (a.avg_score ?? 0))
+          .slice(0, 10)
+          .map((s, i) => {
+            const name = s.full_name || s.email.split("@")[0];
+            const parts = name.trim().split(/\s+/);
+            const initials = parts.length >= 2
+              ? (parts[0][0] + parts[1][0]).toUpperCase()
+              : name.slice(0, 2).toUpperCase();
+            return {
+              rank: i + 1,
+              name,
+              email: s.email,
+              initials,
+              points: Math.round((s.avg_score ?? 0) * (s.passed_tasks ?? 0) * 10),
+              solved: s.passed_tasks ?? 0,
+              id: s.id,
+              trend: "stable",
+            };
+          });
+        setLeaderboard(entries);
+      })
       .finally(() => setLoading(false));
   }, []);
 
@@ -126,7 +158,7 @@ export default function Top10Page() {
             {/* Table rows */}
             {leaderboard.map((row, i) => (
               <div
-                key={row.github_alias || i}
+                key={row.id || i}
                 style={{
                   display: "grid",
                   gridTemplateColumns: "60px 48px 1fr 130px 140px 60px",

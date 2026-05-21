@@ -2,10 +2,11 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { loginTeacher } from "@/lib/api";
+import { login } from "@/lib/api";
 
 export default function AdminLoginPage() {
   const router = useRouter();
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPw, setShowPw] = useState(false);
   const [error, setError] = useState("");
@@ -16,13 +17,18 @@ export default function AdminLoginPage() {
     setLoading(true);
     setError("");
     try {
-      const { ok } = await loginTeacher(password);
-      if (ok) {
+      const result = await login(email, password);
+      if (result.ok && (result.role === "admin" || result.role === "teacher")) {
         localStorage.setItem("admin_logged_in", "true");
-        sessionStorage.setItem("user_role", "teacher");
+        sessionStorage.setItem("user_role", result.role || "admin");
+        sessionStorage.setItem("user_email", email);
+        sessionStorage.setItem("user_id", String(result.user_id ?? ""));
+        sessionStorage.setItem("user_name", result.full_name || email.split("@")[0]);
         router.push("/admin");
+      } else if (result.ok) {
+        setError("У вас нет доступа к панели администратора.");
       } else {
-        setError("Неверный пароль.");
+        setError(result.error || "Неверный email или пароль.");
       }
     } catch {
       setError("Ошибка подключения к серверу.");
@@ -69,12 +75,30 @@ export default function AdminLoginPage() {
 
           <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: "18px" }}>
             <div>
+              <label style={{ fontSize: "13px", fontWeight: 600, color: "#5b6475", textTransform: "uppercase", letterSpacing: "0.5px", display: "block", marginBottom: "8px" }}>
+                Email
+              </label>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="admin@university.edu"
+                required
+                style={{
+                  width: "100%", height: "52px",
+                  border: "1.5px solid #dfdde8", borderRadius: "12px",
+                  padding: "0 16px", fontSize: "16px", color: "#333",
+                  backgroundColor: "white", outline: "none", boxSizing: "border-box",
+                }}
+              />
+            </div>
+            <div>
               <label style={{
                 fontSize: "13px", fontWeight: 600, color: "#5b6475",
                 textTransform: "uppercase", letterSpacing: "0.5px",
                 display: "block", marginBottom: "8px",
               }}>
-                Пароль дашборда
+                Пароль
               </label>
               <div style={{
                 display: "flex", alignItems: "center",
@@ -84,7 +108,7 @@ export default function AdminLoginPage() {
                   type={showPw ? "text" : "password"}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="DASHBOARD_PASSWORD"
+                  placeholder="••••••••"
                   required
                   style={{
                     flex: 1, height: "52px",
@@ -101,9 +125,6 @@ export default function AdminLoginPage() {
                   {showPw ? "🙈" : "👁"}
                 </button>
               </div>
-              <p style={{ fontSize: "12px", color: "#aaa", margin: "6px 0 0" }}>
-                Тот же пароль что в <code>DASHBOARD_PASSWORD</code> (.env)
-              </p>
             </div>
 
             {error && (
