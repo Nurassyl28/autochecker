@@ -36,6 +36,9 @@ class OpenAICompatibleAdapter(LLMAdapter):
         self._headers = {
             "Authorization": f"Bearer {LLM_API_KEY}",
             "Content-Type": "application/json",
+            # Required by OpenRouter (returns 404 without it)
+            "HTTP-Referer": "http://localhost:3000",
+            "X-Title": "Autochecker",
         }
 
     async def complete(self, system: str, user: str) -> str:
