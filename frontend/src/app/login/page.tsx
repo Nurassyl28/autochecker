@@ -7,9 +7,8 @@ import { useRouter } from "next/navigation";
 import { login } from "@/lib/api";
 
 const DEMO_ACCOUNTS = [
-  { role: "teacher" as const, label: "👨‍🏫 Учитель",   email: "teacher@uni.edu",  password: "teacher123" },
-  { role: "student" as const, label: "👨‍🎓 Студент 1", email: "student1@uni.edu", password: "pass1234" },
-  { role: "student" as const, label: "👩‍🎓 Студент 2", email: "student2@uni.edu", password: "pass1234" },
+  { role: "teacher" as const, label: "👨‍🏫 Maksat",   email: "galiev@gmail.com",              password: "maksat123" },
+  { role: "student" as const, label: "👨‍🎓 Nurassyl", email: "bazarbaynurassyl2@gmail.com", password: "nurassyl123" },
 ];
 
 export default function LoginPage() {

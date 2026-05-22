@@ -1,13 +1,10 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
-import {
-  adminGetUsers,
-  adminCreateUser,
-  adminDeleteUser,
-  adminGetAssignments,
-} from "@/lib/api";
+import { adminGetUsers, adminCreateUser, adminDeleteUser, getToken } from "@/lib/api";
+
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 interface User {
   id: number;
@@ -22,64 +19,92 @@ interface Assignment {
   id: number;
   title: string;
   description_text: string | null;
-  spec_status: "pending" | "ready" | "error";
+  spec_status: "pending" | "generating" | "ready" | "failed";
+  llm_spec: { checks?: { id: string; description: string; weight: number }[] } | null;
+  created_by: number | null;
   created_at: string;
 }
 
-type Tab = "users" | "assignments";
+interface Submission {
+  id: number;
+  assignment_id: number;
+  student_id: number;
+  repo_url: string;
+  status: string;
+  pass_fail: "pass" | "fail" | null;
+  score: number | null;
+  created_at: string;
+}
+
+type Tab = "users" | "assignments" | "submissions";
 
 const ROLE_LABELS: Record<string, { label: string; bg: string; color: string }> = {
-  admin:   { label: "Админ",      bg: "#ede9fe", color: "#6d28d9" },
-  teacher: { label: "Учитель",    bg: "#dbeafe", color: "#1d4ed8" },
-  student: { label: "Студент",    bg: "#dcfce7", color: "#15803d" },
+  admin:   { label: "Админ",    bg: "#ede9fe", color: "#6d28d9" },
+  teacher: { label: "Учитель",  bg: "#dbeafe", color: "#1d4ed8" },
+  student: { label: "Студент",  bg: "#dcfce7", color: "#15803d" },
 };
 
 const SPEC_LABELS: Record<string, { label: string; bg: string; color: string }> = {
-  pending: { label: "⏳ Генерация...", bg: "#fef9c3", color: "#a16207" },
-  ready:   { label: "✅ Готово",       bg: "#dcfce7", color: "#15803d" },
-  error:   { label: "❌ Ошибка",       bg: "#fee2e2", color: "#b91c1c" },
+  pending:    { label: "⏳ Ожидание",  bg: "#fef9c3", color: "#a16207" },
+  generating: { label: "🔄 Генерация", bg: "#eff6ff", color: "#1d4ed8" },
+  ready:      { label: "✅ Готово",    bg: "#dcfce7", color: "#15803d" },
+  failed:     { label: "❌ Ошибка",    bg: "#fee2e2", color: "#b91c1c" },
+};
+
+const SUB_STATUS: Record<string, { label: string; bg: string; color: string }> = {
+  pending:    { label: "Ожидание",   bg: "#fef9c3", color: "#a16207" },
+  processing: { label: "Проверяется",bg: "#eff6ff", color: "#1d4ed8" },
+  done:       { label: "Готово",     bg: "#dcfce7", color: "#15803d" },
+  error:      { label: "Ошибка",     bg: "#fee2e2", color: "#b91c1c" },
 };
 
 function initials(u: User) {
   const name = u.full_name || u.email;
   const parts = name.trim().split(/\s+/);
-  return parts.length >= 2
-    ? (parts[0][0] + parts[1][0]).toUpperCase()
-    : name.slice(0, 2).toUpperCase();
+  return parts.length >= 2 ? (parts[0][0] + parts[1][0]).toUpperCase() : name.slice(0, 2).toUpperCase();
 }
 
 const AVATAR_COLORS = ["#1976d2","#e91e63","#4caf50","#9c27b0","#ff9800","#f44336","#00bcd4","#795548"];
 
+function adminHeaders(extra: Record<string, string> = {}): HeadersInit {
+  const t = getToken();
+  return t ? { Authorization: `Bearer ${t}`, ...extra } : extra;
+}
+
 export default function AdminPage() {
   const router = useRouter();
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [tab, setTab] = useState<Tab>("users");
 
-  // ── Users ──────────────────────────────────────────────────────────────────
+  // Users
   const [users, setUsers] = useState<User[]>([]);
   const [usersLoading, setUsersLoading] = useState(true);
-
   const [showCreateUser, setShowCreateUser] = useState(false);
   const [newUser, setNewUser] = useState({ email: "", password: "", full_name: "", role: "student" as "teacher" | "student" });
   const [createUserLoading, setCreateUserLoading] = useState(false);
   const [createUserError, setCreateUserError] = useState("");
 
-  // ── Assignments ────────────────────────────────────────────────────────────
+  // Assignments
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [assignmentsLoading, setAssignmentsLoading] = useState(true);
-
   const [showCreateAssignment, setShowCreateAssignment] = useState(false);
+  const [assignMode, setAssignMode] = useState<"text" | "file">("text");
   const [newAssignment, setNewAssignment] = useState({ title: "", description_text: "" });
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [createAssignmentLoading, setCreateAssignmentLoading] = useState(false);
   const [createAssignmentError, setCreateAssignmentError] = useState("");
+  const [expandedSpec, setExpandedSpec] = useState<number | null>(null);
 
-  // ── Auth guard ─────────────────────────────────────────────────────────────
+  // Submissions
+  const [submissions, setSubmissions] = useState<Submission[]>([]);
+  const [subsLoading, setSubsLoading] = useState(false);
+
+  // Auth guard
   useEffect(() => {
-    if (!localStorage.getItem("admin_logged_in")) {
-      router.replace("/admin/login");
-    }
+    if (!localStorage.getItem("admin_logged_in")) router.replace("/admin/login");
   }, [router]);
 
-  // ── Load data ──────────────────────────────────────────────────────────────
+  // Load data
   const loadUsers = useCallback(async () => {
     setUsersLoading(true);
     const res = await adminGetUsers();
@@ -89,14 +114,28 @@ export default function AdminPage() {
 
   const loadAssignments = useCallback(async () => {
     setAssignmentsLoading(true);
-    const res = await adminGetAssignments();
+    const res = await fetch(`${BASE_URL}/admin/assignments`, { headers: adminHeaders() });
     if (res.ok) setAssignments(await res.json());
     setAssignmentsLoading(false);
   }, []);
 
-  useEffect(() => { loadUsers(); loadAssignments(); }, [loadUsers, loadAssignments]);
+  const loadSubmissions = useCallback(async () => {
+    setSubsLoading(true);
+    const res = await fetch(`${BASE_URL}/admin/submissions`, { headers: adminHeaders() });
+    if (res.ok) setSubmissions(await res.json());
+    setSubsLoading(false);
+  }, []);
 
-  // ── Create user ────────────────────────────────────────────────────────────
+  useEffect(() => {
+    loadUsers();
+    loadAssignments();
+  }, [loadUsers, loadAssignments]);
+
+  useEffect(() => {
+    if (tab === "submissions") loadSubmissions();
+  }, [tab, loadSubmissions]);
+
+  // Create user
   async function handleCreateUser(e: React.FormEvent) {
     e.preventDefault();
     setCreateUserLoading(true);
@@ -108,61 +147,69 @@ export default function AdminPage() {
       await loadUsers();
     } else {
       const err = await res.json().catch(() => ({}));
-      setCreateUserError((err as { detail?: string }).detail || "Ошибка создания");
+      const detail = (err as { detail?: unknown }).detail;
+      setCreateUserError(
+        typeof detail === "string" ? detail
+        : Array.isArray(detail) ? detail.map((d: { msg?: string }) => d.msg ?? "").join("; ")
+        : "Ошибка создания пользователя"
+      );
     }
     setCreateUserLoading(false);
   }
 
-  // ── Delete user ────────────────────────────────────────────────────────────
   async function handleDeleteUser(id: number, email: string) {
     if (!confirm(`Удалить пользователя ${email}?`)) return;
     await adminDeleteUser(id);
     await loadUsers();
   }
 
-  // ── Create assignment ──────────────────────────────────────────────────────
+  // Create assignment
   async function handleCreateAssignment(e: React.FormEvent) {
     e.preventDefault();
-    if (!newAssignment.title.trim() || !newAssignment.description_text.trim()) {
-      setCreateAssignmentError("Заполните название и описание");
-      return;
-    }
+    if (!newAssignment.title.trim()) { setCreateAssignmentError("Введите название"); return; }
     setCreateAssignmentLoading(true);
     setCreateAssignmentError("");
-    const token = localStorage.getItem("auth_token") || sessionStorage.getItem("auth_token");
-    const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-    const r = await fetch(`${BASE}/admin/assignments`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-      body: JSON.stringify(newAssignment),
-    });
-    if (r.ok) {
+
+    let res: Response;
+    if (assignMode === "file" && uploadFile) {
+      const fd = new FormData();
+      fd.append("title", newAssignment.title.trim());
+      fd.append("file", uploadFile);
+      res = await fetch(`${BASE_URL}/admin/assignments/upload`, { method: "POST", headers: adminHeaders(), body: fd });
+    } else {
+      if (!newAssignment.description_text.trim()) { setCreateAssignmentError("Введите описание"); setCreateAssignmentLoading(false); return; }
+      res = await fetch(`${BASE_URL}/admin/assignments`, {
+        method: "POST",
+        headers: adminHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify(newAssignment),
+      });
+    }
+
+    if (res.ok) {
       setShowCreateAssignment(false);
       setNewAssignment({ title: "", description_text: "" });
+      setUploadFile(null);
       await loadAssignments();
     } else {
-      const err = await r.json().catch(() => ({}));
-      setCreateAssignmentError((err as { detail?: string }).detail || "Ошибка создания");
+      const err = await res.json().catch(() => ({}));
+      const detail = (err as { detail?: unknown }).detail;
+      setCreateAssignmentError(
+        typeof detail === "string" ? detail
+        : Array.isArray(detail) ? detail.map((d: { msg?: string }) => d.msg ?? "").join("; ")
+        : "Ошибка создания задания"
+      );
     }
     setCreateAssignmentLoading(false);
   }
 
-  // ── Delete assignment ──────────────────────────────────────────────────────
   async function handleDeleteAssignment(id: number, title: string) {
     if (!confirm(`Удалить задание "${title}"?`)) return;
-    const token = localStorage.getItem("auth_token") || sessionStorage.getItem("auth_token");
-    const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-    await fetch(`${BASE}/admin/assignments/${id}`, {
-      method: "DELETE",
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
+    await fetch(`${BASE_URL}/admin/assignments/${id}`, { method: "DELETE", headers: adminHeaders() });
     await loadAssignments();
   }
 
-  const btnBase: React.CSSProperties = {
-    height: "38px", padding: "0 18px", borderRadius: "8px",
-    fontSize: "14px", fontWeight: 600, cursor: "pointer", border: "none",
-  };
+  const btnBase: React.CSSProperties = { height: "38px", padding: "0 18px", borderRadius: "8px", fontSize: "14px", fontWeight: 600, cursor: "pointer", border: "none" };
+  const inputStyle: React.CSSProperties = { height: "38px", padding: "0 12px", border: "1px solid #d1d5db", borderRadius: "8px", fontSize: "14px", outline: "none" };
 
   return (
     <div style={{ minHeight: "100vh", backgroundColor: "#f5f6fa", fontFamily: "Inter, sans-serif" }}>
@@ -173,10 +220,8 @@ export default function AdminPage() {
           <div style={{ width: "36px", height: "36px", backgroundColor: "#142175", borderRadius: "10px", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "18px" }}>🛡</div>
           <span style={{ fontSize: "18px", fontWeight: 700, color: "#111" }}>Autochecker Admin</span>
         </div>
-        <button
-          onClick={() => { localStorage.removeItem("admin_logged_in"); router.push("/admin/login"); }}
-          style={{ ...btnBase, backgroundColor: "#fef2f2", color: "#e53e3e" }}
-        >
+        <button onClick={() => { localStorage.removeItem("admin_logged_in"); router.push("/admin/login"); }}
+          style={{ ...btnBase, backgroundColor: "#fef2f2", color: "#e53e3e" }}>
           Выйти
         </button>
       </div>
@@ -185,79 +230,50 @@ export default function AdminPage() {
 
         {/* Tabs */}
         <div style={{ display: "flex", gap: "4px", marginBottom: "24px", backgroundColor: "white", border: "1px solid #e5e7eb", borderRadius: "10px", padding: "4px", width: "fit-content" }}>
-          {([["users", "👤 Пользователи"], ["assignments", "📋 Задания"]] as [Tab, string][]).map(([key, label]) => (
-            <button
-              key={key}
-              onClick={() => setTab(key)}
-              style={{
-                ...btnBase,
-                backgroundColor: tab === key ? "#142175" : "transparent",
-                color: tab === key ? "white" : "#555",
-                border: "none",
-              }}
-            >
+          {([["users", "👤 Пользователи"], ["assignments", "📋 Задания"], ["submissions", "📨 Сдачи"]] as [Tab, string][]).map(([key, label]) => (
+            <button key={key} onClick={() => setTab(key)} style={{ ...btnBase, backgroundColor: tab === key ? "#142175" : "transparent", color: tab === key ? "white" : "#555", border: "none" }}>
               {label}
             </button>
           ))}
         </div>
 
-        {/* ── USERS TAB ── */}
+        {/* ── USERS ── */}
         {tab === "users" && (
           <div style={{ backgroundColor: "white", border: "1px solid #e5e7eb", borderRadius: "12px", overflow: "hidden" }}>
-
-            {/* Toolbar */}
             <div style={{ padding: "16px 24px", borderBottom: "1px solid #e5e7eb", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <h2 style={{ fontSize: "18px", fontWeight: 700, color: "#111", margin: 0 }}>
-                Пользователи ({users.length})
-              </h2>
+              <h2 style={{ fontSize: "18px", fontWeight: 700, color: "#111", margin: 0 }}>Пользователи ({users.length})</h2>
               <div style={{ display: "flex", gap: "8px" }}>
                 <button onClick={loadUsers} style={{ ...btnBase, backgroundColor: "#f3f4f6", color: "#374151" }}>↻ Обновить</button>
                 <button onClick={() => setShowCreateUser(true)} style={{ ...btnBase, backgroundColor: "#142175", color: "white" }}>+ Добавить</button>
               </div>
             </div>
 
-            {/* Create user modal */}
             {showCreateUser && (
               <div style={{ padding: "20px 24px", borderBottom: "1px solid #e5e7eb", backgroundColor: "#f9fafb" }}>
                 <h3 style={{ fontSize: "15px", fontWeight: 700, margin: "0 0 16px", color: "#111" }}>Новый пользователь</h3>
                 <form onSubmit={handleCreateUser} style={{ display: "flex", gap: "10px", flexWrap: "wrap", alignItems: "flex-end" }}>
-                  {[
-                    { key: "full_name", placeholder: "Полное имя", type: "text" },
-                    { key: "email",     placeholder: "Email",      type: "email" },
-                    { key: "password",  placeholder: "Пароль",     type: "password" },
-                  ].map(({ key, placeholder, type }) => (
-                    <input
-                      key={key}
-                      type={type}
-                      placeholder={placeholder}
-                      required
-                      value={(newUser as Record<string, string>)[key]}
-                      onChange={(e) => setNewUser((p) => ({ ...p, [key]: e.target.value }))}
-                      style={{ height: "38px", padding: "0 12px", border: "1px solid #d1d5db", borderRadius: "8px", fontSize: "14px", outline: "none", minWidth: "180px" }}
-                    />
-                  ))}
-                  <select
-                    value={newUser.role}
-                    onChange={(e) => setNewUser((p) => ({ ...p, role: e.target.value as "teacher" | "student" }))}
-                    style={{ height: "38px", padding: "0 12px", border: "1px solid #d1d5db", borderRadius: "8px", fontSize: "14px", outline: "none" }}
-                  >
+                  {[{ key: "full_name", placeholder: "Полное имя", type: "text" }, { key: "email", placeholder: "Email", type: "email" }, { key: "password", placeholder: "Пароль", type: "password" }]
+                    .map(({ key, placeholder, type }) => (
+                      <input key={key} type={type} placeholder={placeholder} required
+                        value={(newUser as Record<string, string>)[key]}
+                        onChange={(e) => setNewUser((p) => ({ ...p, [key]: e.target.value }))}
+                        style={{ ...inputStyle, minWidth: "180px" }} />
+                    ))}
+                  <select value={newUser.role} onChange={(e) => setNewUser((p) => ({ ...p, role: e.target.value as "teacher" | "student" }))} style={{ ...inputStyle }}>
                     <option value="student">Студент</option>
                     <option value="teacher">Учитель</option>
                   </select>
                   <button type="submit" disabled={createUserLoading} style={{ ...btnBase, backgroundColor: "#142175", color: "white", opacity: createUserLoading ? 0.6 : 1 }}>
                     {createUserLoading ? "Создаём..." : "Создать"}
                   </button>
-                  <button type="button" onClick={() => { setShowCreateUser(false); setCreateUserError(""); }} style={{ ...btnBase, backgroundColor: "#f3f4f6", color: "#374151" }}>
-                    Отмена
-                  </button>
+                  <button type="button" onClick={() => { setShowCreateUser(false); setCreateUserError(""); }} style={{ ...btnBase, backgroundColor: "#f3f4f6", color: "#374151" }}>Отмена</button>
                 </form>
                 {createUserError && <p style={{ color: "#e53e3e", fontSize: "13px", margin: "8px 0 0" }}>{createUserError}</p>}
               </div>
             )}
 
-            {/* Table header */}
             <div style={{ display: "grid", gridTemplateColumns: "40px 2fr 2fr 120px 150px 80px", padding: "10px 24px", backgroundColor: "#f9fafb", borderBottom: "1px solid #e5e7eb" }}>
-              {["", "Имя / Email", "Telegram ID", "Роль", "Дата создания", ""].map((h, i) => (
+              {["", "Имя / Email", "Telegram ID", "Роль", "Дата", ""].map((h, i) => (
                 <span key={i} style={{ fontSize: "12px", fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.4px" }}>{h}</span>
               ))}
             </div>
@@ -268,15 +284,11 @@ export default function AdminPage() {
               <div style={{ padding: "48px", textAlign: "center", color: "#9ca3af" }}>Пользователей нет</div>
             ) : users.map((u, i) => {
               const roleInfo = ROLE_LABELS[u.role] ?? ROLE_LABELS.student;
-              const color = AVATAR_COLORS[i % AVATAR_COLORS.length];
               return (
-                <div
-                  key={u.id}
-                  style={{ display: "grid", gridTemplateColumns: "40px 2fr 2fr 120px 150px 80px", padding: "12px 24px", alignItems: "center", borderBottom: i < users.length - 1 ? "1px solid #f3f4f6" : "none" }}
+                <div key={u.id} style={{ display: "grid", gridTemplateColumns: "40px 2fr 2fr 120px 150px 80px", padding: "12px 24px", alignItems: "center", borderBottom: i < users.length - 1 ? "1px solid #f3f4f6" : "none" }}
                   onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "#fafafa")}
-                  onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
-                >
-                  <div style={{ width: "32px", height: "32px", borderRadius: "50%", backgroundColor: color, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}>
+                  <div style={{ width: "32px", height: "32px", borderRadius: "50%", backgroundColor: AVATAR_COLORS[i % AVATAR_COLORS.length], display: "flex", alignItems: "center", justifyContent: "center" }}>
                     <span style={{ fontSize: "12px", fontWeight: 700, color: "white" }}>{initials(u)}</span>
                   </div>
                   <div>
@@ -288,113 +300,174 @@ export default function AdminPage() {
                     {roleInfo.label}
                   </span>
                   <span style={{ fontSize: "13px", color: "#6b7280" }}>{u.created_at.slice(0, 10)}</span>
-                  {u.role !== "admin" ? (
-                    <button
-                      onClick={() => handleDeleteUser(u.id, u.email)}
-                      style={{ ...btnBase, height: "30px", padding: "0 12px", backgroundColor: "#fee2e2", color: "#b91c1c", fontSize: "12px" }}
-                    >
-                      Удалить
-                    </button>
-                  ) : <span />}
+                  {u.role !== "admin"
+                    ? <button onClick={() => handleDeleteUser(u.id, u.email)} style={{ ...btnBase, height: "30px", padding: "0 12px", backgroundColor: "#fee2e2", color: "#b91c1c", fontSize: "12px" }}>Удалить</button>
+                    : <span />}
                 </div>
               );
             })}
           </div>
         )}
 
-        {/* ── ASSIGNMENTS TAB ── */}
+        {/* ── ASSIGNMENTS ── */}
         {tab === "assignments" && (
           <div style={{ backgroundColor: "white", border: "1px solid #e5e7eb", borderRadius: "12px", overflow: "hidden" }}>
-
-            {/* Toolbar */}
             <div style={{ padding: "16px 24px", borderBottom: "1px solid #e5e7eb", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <h2 style={{ fontSize: "18px", fontWeight: 700, color: "#111", margin: 0 }}>
-                Задания ({assignments.length})
-              </h2>
+              <h2 style={{ fontSize: "18px", fontWeight: 700, color: "#111", margin: 0 }}>Задания ({assignments.length})</h2>
               <div style={{ display: "flex", gap: "8px" }}>
                 <button onClick={loadAssignments} style={{ ...btnBase, backgroundColor: "#f3f4f6", color: "#374151" }}>↻ Обновить</button>
                 <button onClick={() => setShowCreateAssignment(true)} style={{ ...btnBase, backgroundColor: "#142175", color: "white" }}>+ Добавить</button>
               </div>
             </div>
 
-            {/* Create assignment form */}
             {showCreateAssignment && (
               <div style={{ padding: "20px 24px", borderBottom: "1px solid #e5e7eb", backgroundColor: "#f9fafb" }}>
-                <h3 style={{ fontSize: "15px", fontWeight: 700, margin: "0 0 16px", color: "#111" }}>Новое задание</h3>
-                <form onSubmit={handleCreateAssignment} style={{ display: "flex", flexDirection: "column", gap: "10px", maxWidth: "640px" }}>
-                  <input
-                    type="text"
-                    placeholder="Название задания (например: Lab 1 — Hello World)"
-                    required
-                    value={newAssignment.title}
+                <h3 style={{ fontSize: "15px", fontWeight: 700, margin: "0 0 14px", color: "#111" }}>Новое задание</h3>
+
+                {/* Mode toggle */}
+                <div style={{ display: "flex", gap: "8px", marginBottom: "14px" }}>
+                  {(["text", "file"] as const).map((m) => (
+                    <button key={m} onClick={() => setAssignMode(m)} style={{ ...btnBase, height: "34px", backgroundColor: assignMode === m ? "#142175" : "#f3f4f6", color: assignMode === m ? "white" : "#374151" }}>
+                      {m === "text" ? "✏️ Текстом" : "📎 Файл (.txt .md .pdf .docx)"}
+                    </button>
+                  ))}
+                </div>
+
+                <form onSubmit={handleCreateAssignment} style={{ display: "flex", flexDirection: "column", gap: "10px", maxWidth: "680px" }}>
+                  <input type="text" placeholder="Название задания" required value={newAssignment.title}
                     onChange={(e) => setNewAssignment((p) => ({ ...p, title: e.target.value }))}
-                    style={{ height: "40px", padding: "0 12px", border: "1px solid #d1d5db", borderRadius: "8px", fontSize: "14px", outline: "none" }}
-                  />
-                  <textarea
-                    placeholder="Описание задания — LLM автоматически сгенерирует критерии проверки на основе этого текста..."
-                    required
-                    rows={5}
-                    value={newAssignment.description_text}
-                    onChange={(e) => setNewAssignment((p) => ({ ...p, description_text: e.target.value }))}
-                    style={{ padding: "10px 12px", border: "1px solid #d1d5db", borderRadius: "8px", fontSize: "14px", outline: "none", resize: "vertical", fontFamily: "inherit" }}
-                  />
-                  <p style={{ fontSize: "12px", color: "#6b7280", margin: 0 }}>
-                    💡 После создания LLM автоматически сгенерирует spec (критерии). Статус изменится на «Готово» через несколько секунд (нужен реальный LLM ключ).
-                  </p>
+                    style={{ ...inputStyle, height: "40px", width: "100%" }} />
+
+                  {assignMode === "text" ? (
+                    <textarea placeholder="Описание задания..." required rows={5} value={newAssignment.description_text}
+                      onChange={(e) => setNewAssignment((p) => ({ ...p, description_text: e.target.value }))}
+                      style={{ padding: "10px 12px", border: "1px solid #d1d5db", borderRadius: "8px", fontSize: "14px", outline: "none", resize: "vertical", fontFamily: "inherit" }} />
+                  ) : (
+                    <div onClick={() => fileInputRef.current?.click()}
+                      style={{ border: "2px dashed #d1d5db", borderRadius: "8px", padding: "20px", textAlign: "center", cursor: "pointer", backgroundColor: "white" }}>
+                      <input ref={fileInputRef} type="file" accept=".txt,.md,.pdf,.docx" style={{ display: "none" }} onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)} />
+                      {uploadFile
+                        ? <p style={{ margin: 0, fontSize: "14px", color: "#111" }}>📄 {uploadFile.name}</p>
+                        : <p style={{ margin: 0, fontSize: "14px", color: "#6b7280" }}>Нажмите чтобы выбрать файл (.txt .md .pdf .docx)</p>}
+                    </div>
+                  )}
+
+                  {createAssignmentError && <p style={{ color: "#e53e3e", fontSize: "13px", margin: 0 }}>{createAssignmentError}</p>}
+
                   <div style={{ display: "flex", gap: "8px" }}>
                     <button type="submit" disabled={createAssignmentLoading} style={{ ...btnBase, backgroundColor: "#142175", color: "white", opacity: createAssignmentLoading ? 0.6 : 1 }}>
                       {createAssignmentLoading ? "Создаём..." : "Создать задание"}
                     </button>
-                    <button type="button" onClick={() => { setShowCreateAssignment(false); setCreateAssignmentError(""); }} style={{ ...btnBase, backgroundColor: "#f3f4f6", color: "#374151" }}>
-                      Отмена
-                    </button>
+                    <button type="button" onClick={() => { setShowCreateAssignment(false); setCreateAssignmentError(""); }} style={{ ...btnBase, backgroundColor: "#f3f4f6", color: "#374151" }}>Отмена</button>
                   </div>
-                  {createAssignmentError && <p style={{ color: "#e53e3e", fontSize: "13px", margin: 0 }}>{createAssignmentError}</p>}
                 </form>
               </div>
             )}
 
-            {/* Table header */}
-            <div style={{ display: "grid", gridTemplateColumns: "60px 3fr 140px 150px 80px", padding: "10px 24px", backgroundColor: "#f9fafb", borderBottom: "1px solid #e5e7eb" }}>
-              {["ID", "Название", "Статус spec", "Дата создания", ""].map((h, i) => (
+            {/* Assignment rows */}
+            {assignmentsLoading ? (
+              <div style={{ padding: "48px", textAlign: "center", color: "#9ca3af" }}>Загрузка...</div>
+            ) : assignments.length === 0 ? (
+              <div style={{ padding: "48px", textAlign: "center", color: "#9ca3af" }}>Заданий нет.</div>
+            ) : assignments.map((a, i) => {
+              const spec = SPEC_LABELS[a.spec_status] ?? SPEC_LABELS.pending;
+              const isExpanded = expandedSpec === a.id;
+              const checks = a.llm_spec?.checks ?? [];
+              return (
+                <div key={a.id} style={{ borderBottom: i < assignments.length - 1 ? "1px solid #f3f4f6" : "none" }}>
+                  <div style={{ display: "flex", alignItems: "center", padding: "14px 24px", gap: "16px" }}
+                    onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "#fafafa")}
+                    onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}>
+                    <span style={{ fontSize: "13px", color: "#9ca3af", fontFamily: "monospace", flexShrink: 0 }}>#{a.id}</span>
+                    <div style={{ flex: 1 }}>
+                      <p style={{ margin: "0 0 3px", fontSize: "15px", fontWeight: 600, color: "#111" }}>{a.title}</p>
+                      {a.description_text && (
+                        <p style={{ margin: 0, fontSize: "12px", color: "#9ca3af", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "460px" }}>
+                          {a.description_text.slice(0, 120)}...
+                        </p>
+                      )}
+                    </div>
+                    <span style={{ display: "inline-flex", alignItems: "center", height: "26px", padding: "0 10px", borderRadius: "13px", fontSize: "12px", fontWeight: 600, backgroundColor: spec.bg, color: spec.color, whiteSpace: "nowrap" }}>
+                      {spec.label}
+                    </span>
+                    <span style={{ fontSize: "13px", color: "#6b7280", flexShrink: 0 }}>{a.created_at.slice(0, 10)}</span>
+                    {a.llm_spec && (
+                      <button onClick={() => setExpandedSpec(isExpanded ? null : a.id)}
+                        style={{ ...btnBase, height: "30px", padding: "0 12px", backgroundColor: isExpanded ? "#142175" : "#eff6ff", color: isExpanded ? "white" : "#1d4ed8", fontSize: "12px" }}>
+                        {isExpanded ? "Скрыть spec" : "Spec"}
+                      </button>
+                    )}
+                    <button onClick={() => handleDeleteAssignment(a.id, a.title)}
+                      style={{ ...btnBase, height: "30px", padding: "0 12px", backgroundColor: "#fee2e2", color: "#b91c1c", fontSize: "12px" }}>
+                      Удалить
+                    </button>
+                  </div>
+
+                  {isExpanded && a.llm_spec && (
+                    <div style={{ padding: "14px 24px 18px", backgroundColor: "#f8fafc", borderTop: "1px solid #e5e7eb" }}>
+                      <p style={{ fontSize: "11px", fontWeight: 700, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.5px", margin: "0 0 10px" }}>
+                        Критерии проверки (сгенерировано LLM)
+                      </p>
+                      {checks.length > 0
+                        ? checks.map((c, ci) => (
+                            <div key={ci} style={{ display: "flex", gap: "12px", padding: "7px 0", borderBottom: ci < checks.length - 1 ? "1px solid #e5e7eb" : "none" }}>
+                              <span style={{ fontSize: "12px", fontWeight: 700, color: "#142175", flexShrink: 0, minWidth: "32px" }}>{Math.round(c.weight * 100)}%</span>
+                              <div>
+                                <p style={{ margin: "0 0 2px", fontSize: "13px", fontWeight: 600, color: "#111" }}>{c.id}</p>
+                                <p style={{ margin: 0, fontSize: "12px", color: "#6b7280" }}>{c.description}</p>
+                              </div>
+                            </div>
+                          ))
+                        : <pre style={{ fontSize: "12px", color: "#6b7280", overflow: "auto", maxHeight: "300px", margin: 0 }}>{JSON.stringify(a.llm_spec, null, 2)}</pre>
+                      }
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* ── SUBMISSIONS ── */}
+        {tab === "submissions" && (
+          <div style={{ backgroundColor: "white", border: "1px solid #e5e7eb", borderRadius: "12px", overflow: "hidden" }}>
+            <div style={{ padding: "16px 24px", borderBottom: "1px solid #e5e7eb", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <h2 style={{ fontSize: "18px", fontWeight: 700, color: "#111", margin: 0 }}>Все сдачи ({submissions.length})</h2>
+              <button onClick={loadSubmissions} style={{ ...btnBase, backgroundColor: "#f3f4f6", color: "#374151" }}>↻ Обновить</button>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "60px 80px 80px 200px 120px 100px 80px", padding: "10px 24px", backgroundColor: "#f9fafb", borderBottom: "1px solid #e5e7eb" }}>
+              {["#", "Задание", "Студент", "Репозиторий", "Статус", "Оценка", "Дата"].map((h, i) => (
                 <span key={i} style={{ fontSize: "12px", fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.4px" }}>{h}</span>
               ))}
             </div>
 
-            {assignmentsLoading ? (
+            {subsLoading ? (
               <div style={{ padding: "48px", textAlign: "center", color: "#9ca3af" }}>Загрузка...</div>
-            ) : assignments.length === 0 ? (
-              <div style={{ padding: "48px", textAlign: "center", color: "#9ca3af" }}>
-                Заданий нет. Нажмите «+ Добавить» чтобы создать первое.
-              </div>
-            ) : assignments.map((a, i) => {
-              const spec = SPEC_LABELS[a.spec_status] ?? SPEC_LABELS.pending;
+            ) : submissions.length === 0 ? (
+              <div style={{ padding: "48px", textAlign: "center", color: "#9ca3af" }}>Сдач пока нет.</div>
+            ) : submissions.map((s, i) => {
+              const st = SUB_STATUS[s.status] ?? SUB_STATUS.pending;
+              const scoreStr = s.score != null ? `${Math.round(s.score * 100)}%` : "—";
+              const pfColor = s.pass_fail === "pass" ? "#15803d" : s.pass_fail === "fail" ? "#b91c1c" : "#6b7280";
               return (
-                <div
-                  key={a.id}
-                  style={{ display: "grid", gridTemplateColumns: "60px 3fr 140px 150px 80px", padding: "14px 24px", alignItems: "center", borderBottom: i < assignments.length - 1 ? "1px solid #f3f4f6" : "none" }}
+                <div key={s.id} style={{ display: "grid", gridTemplateColumns: "60px 80px 80px 200px 120px 100px 80px", padding: "12px 24px", alignItems: "center", borderBottom: i < submissions.length - 1 ? "1px solid #f3f4f6" : "none" }}
                   onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "#fafafa")}
-                  onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
-                >
-                  <span style={{ fontSize: "13px", color: "#9ca3af", fontFamily: "monospace" }}>#{a.id}</span>
-                  <div>
-                    <p style={{ margin: "0 0 3px", fontSize: "15px", fontWeight: 600, color: "#111" }}>{a.title}</p>
-                    {a.description_text && (
-                      <p style={{ margin: 0, fontSize: "12px", color: "#9ca3af", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "420px" }}>
-                        {a.description_text.slice(0, 100)}...
-                      </p>
-                    )}
-                  </div>
-                  <span style={{ display: "inline-flex", alignItems: "center", height: "26px", padding: "0 10px", borderRadius: "13px", fontSize: "12px", fontWeight: 600, backgroundColor: spec.bg, color: spec.color, whiteSpace: "nowrap" }}>
-                    {spec.label}
+                  onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}>
+                  <span style={{ fontSize: "13px", color: "#9ca3af", fontFamily: "monospace" }}>#{s.id}</span>
+                  <span style={{ fontSize: "13px", color: "#374151" }}>#{s.assignment_id}</span>
+                  <span style={{ fontSize: "13px", color: "#374151" }}>#{s.student_id}</span>
+                  <a href={s.repo_url} target="_blank" rel="noreferrer"
+                    style={{ fontSize: "12px", color: "#142175", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {s.repo_url.replace("https://github.com/", "")}
+                  </a>
+                  <span style={{ display: "inline-flex", alignItems: "center", height: "22px", padding: "0 8px", borderRadius: "11px", fontSize: "11px", fontWeight: 600, backgroundColor: st.bg, color: st.color }}>
+                    {st.label}
                   </span>
-                  <span style={{ fontSize: "13px", color: "#6b7280" }}>{a.created_at.slice(0, 10)}</span>
-                  <button
-                    onClick={() => handleDeleteAssignment(a.id, a.title)}
-                    style={{ ...btnBase, height: "30px", padding: "0 12px", backgroundColor: "#fee2e2", color: "#b91c1c", fontSize: "12px" }}
-                  >
-                    Удалить
-                  </button>
+                  <span style={{ fontSize: "14px", fontWeight: 700, color: pfColor }}>
+                    {scoreStr} {s.pass_fail ? (s.pass_fail === "pass" ? "✓" : "✗") : ""}
+                  </span>
+                  <span style={{ fontSize: "12px", color: "#9ca3af" }}>{s.created_at.slice(0, 10)}</span>
                 </div>
               );
             })}

@@ -8,15 +8,9 @@ from .database import get_task_stats, has_passed_task
 
 
 def get_labs_keyboard(server_ip: str = "") -> InlineKeyboardMarkup:
-    """Create inline keyboard with available labs + VM IP button."""
+    """Create inline keyboard — only v2 assignments."""
     builder = InlineKeyboardBuilder()
-    for lab_id, title in get_lab_titles().items():
-        builder.add(
-            InlineKeyboardButton(text=title, callback_data=f"lab:{lab_id}")
-        )
-    builder.adjust(1)
-    ip_label = f"VM: {server_ip}" if server_ip else "Set VM IP"
-    builder.row(InlineKeyboardButton(text=ip_label, callback_data="change_ip"))
+    builder.row(InlineKeyboardButton(text="📋 Задания", callback_data="assignments:list"))
     return builder.as_markup()
 
 

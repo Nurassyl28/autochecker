@@ -31,8 +31,8 @@
   --color-text-muted: #495469;
   --color-text-light: #6b7280;
   --color-text-subtle: #888888;
-  --color-nav-active: #0500c7;
-  --color-nav-active-bg: transparent;
+  --color-nav-active: #142175;
+  --color-nav-active-bg: #eef0fb;
 
   /* ── Accent / buttons ── */
   --color-accent: #142175;
@@ -60,7 +60,7 @@
   --color-status-inprogress-text: #3332ce;
 
   --font-inter: "Inter", sans-serif;
-  --sidebar-width: 288px;
+  --sidebar-width: 256px;
 }
 
 @layer base {
@@ -193,7 +193,7 @@ html.dark ::-webkit-scrollbar-thumb:hover {
 
   .dashboard-sidebar {
     position: fixed !important;
-    left: -288px;
+    left: -256px;
     top: 0;
     height: 100vh;
     z-index: 100;
@@ -242,7 +242,7 @@ html.dark ::-webkit-scrollbar-thumb:hover {
 
 @media (max-width: 1024px) {
   .dashboard-sidebar {
-    width: 240px !important;
-    min-width: 240px !important;
+    width: 220px !important;
+    min-width: 220px !important;
   }
 }

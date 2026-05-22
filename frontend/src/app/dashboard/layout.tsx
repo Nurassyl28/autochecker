@@ -39,7 +39,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       />
 
       {/* Sidebar */}
-      <div className={`dashboard-sidebar${sidebarOpen ? " open" : ""}`}>
+      <div className={`dashboard-sidebar${sidebarOpen ? " open" : ""}`} style={{ width: "256px", minWidth: "256px" }}>
         <Sidebar role={role} onClose={closeSidebar} />
       </div>
 

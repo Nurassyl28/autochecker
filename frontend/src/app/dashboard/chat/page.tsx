@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
-import { getChatConversations, getChatMessages, sendChatMessage, getStudents } from "@/lib/api";
+import { getChatPartners, getChatConversations, getChatMessages, sendChatMessage } from "@/lib/api";
 
 interface Partner {
   id: number;
@@ -25,17 +25,11 @@ interface Message {
   read_at: string | null;
 }
 
-// Student row from teacher endpoint
-interface StudentRow {
-  id: number;
-  email: string;
-  full_name: string | null;
-}
 
 const BG_COLORS = ["#e8e4f0", "#fce4ec", "#e3f2fd", "#e8f5e9", "#fff3e0", "#f3e5f5"];
 const TXT_COLORS = ["#5566cc", "#c62828", "#1565c0", "#2e7d32", "#e65100", "#6a1b9a"];
 
-function partnerInitials(p: Partner | StudentRow): string {
+function partnerInitials(p: Partner): string {
   const name = p.full_name || p.email;
   const parts = name.trim().split(/\s+/);
   return parts.length >= 2
@@ -43,7 +37,7 @@ function partnerInitials(p: Partner | StudentRow): string {
     : name.slice(0, 2).toUpperCase();
 }
 
-function displayName(p: Partner | StudentRow): string {
+function displayName(p: Partner): string {
   return p.full_name || p.email.split("@")[0];
 }
 
@@ -58,7 +52,7 @@ function ChatInner() {
   const [role, setRole] = useState<"teacher" | "student">("student");
   const [myId, setMyId] = useState<number>(0);
   const [myName, setMyName] = useState<string>("Я");
-  const [partners, setPartners] = useState<(Partner | StudentRow)[]>([]);
+  const [partners, setPartners] = useState<(Partner)[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -76,32 +70,34 @@ function ChatInner() {
     setMyName(name);
   }, []);
 
-  // Load contacts list
+  // Load contacts list — all available partners + merge last-message timestamps
   useEffect(() => {
     if (!role) return;
 
     async function loadContacts() {
-      if (role === "teacher") {
-        // Teacher sees all students
-        const res = await getStudents();
-        if (res.ok) {
-          const data: StudentRow[] = await res.json();
-          setPartners(Array.isArray(data) ? data : []);
-          // Preselect from URL or first student
-          const targetId = preselect ? Number(preselect) : (data[0]?.id ?? null);
-          setSelectedId(targetId);
-        }
-      } else {
-        // Student sees conversation partners
-        const res = await getChatConversations();
-        if (res.ok) {
-          const data: Conversation[] = await res.json();
-          const list = (Array.isArray(data) ? data : []).map((c) => c.user);
-          setPartners(list);
-          const targetId = preselect ? Number(preselect) : (list[0]?.id ?? null);
-          setSelectedId(targetId);
-        }
-      }
+      // Get all available partners (teachers for students, students for teachers)
+      const partnersRes = await getChatPartners();
+      const allPartners: Partner[] = partnersRes.ok ? await partnersRes.json() : [];
+
+      // Get existing conversations to show last-message time
+      const convsRes = await getChatConversations();
+      const convs: Conversation[] = convsRes.ok ? await convsRes.json() : [];
+      const lastMsgMap: Record<number, string> = {};
+      for (const c of convs) lastMsgMap[c.user.id] = c.last_message_at;
+
+      // Sort: partners with messages first (by last_message_at desc), then rest alphabetically
+      const sorted = [...allPartners].sort((a, b) => {
+        const ta = lastMsgMap[a.id] ?? "";
+        const tb = lastMsgMap[b.id] ?? "";
+        if (ta && tb) return tb.localeCompare(ta);
+        if (ta) return -1;
+        if (tb) return 1;
+        return (a.full_name || a.email).localeCompare(b.full_name || b.email);
+      });
+
+      setPartners(sorted);
+      const targetId = preselect ? Number(preselect) : (sorted[0]?.id ?? null);
+      setSelectedId(targetId);
     }
 
     loadContacts();
@@ -122,7 +118,7 @@ function ChatInner() {
     if (!selectedId) return;
     loadMessages();
     if (pollRef.current) clearInterval(pollRef.current);
-    pollRef.current = setInterval(loadMessages, 3000);
+    pollRef.current = setInterval(loadMessages, 8000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [selectedId, loadMessages]);
 

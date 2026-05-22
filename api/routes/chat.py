@@ -9,6 +9,27 @@ from ..models import MessageCreate, MessageResponse
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 
+@router.get("/partners")
+async def list_partners(user: dict = Depends(require_any)):
+    """Return all users the current user can chat with.
+    Students → all teachers. Teachers → all students.
+    """
+    if user["role"] == "student":
+        target_roles = ("teacher", "admin")
+    else:
+        target_roles = ("student",)
+
+    rows = await db.fetchall(
+        """
+        SELECT id, email, full_name, role FROM users
+        WHERE university_id = %s AND role = ANY(%s) AND id != %s
+        ORDER BY full_name, email
+        """,
+        (user["university_id"], list(target_roles), user["id"]),
+    )
+    return [dict(r) for r in rows]
+
+
 @router.get("/conversations")
 async def list_conversations(user: dict = Depends(require_any)):
     """Return the list of users this user has exchanged messages with, most recent first."""

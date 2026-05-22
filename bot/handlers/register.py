@@ -1,7 +1,7 @@
 """Handler for student self-registration."""
 
 import re
-from typing import Any, Dict
+from typing import Any
 
 from aiogram import Router, F
 from aiogram.filters import CommandStart, BaseFilter
@@ -10,18 +10,17 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 from ..config import ALLOWED_EMAILS
-from ..database import User, upsert_user, get_user_by_email, get_user_by_github
+from ..database import User, upsert_user, get_user_by_email
 from ..keyboards import get_labs_keyboard
+from .. import api_client
 
 router = Router()
 
-EMAIL_REGEX = re.compile(r"^[^@\s]+@innopolis\.university$", re.IGNORECASE)
+EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", re.IGNORECASE)
 GITHUB_REGEX = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?$")
 
 
 class NotRegistered(BaseFilter):
-    """Filter that passes only when db_user is None (unregistered)."""
-
     async def __call__(self, event: TelegramObject, db_user: Any = None) -> bool:
         return db_user is None
 
@@ -36,30 +35,25 @@ not_registered = NotRegistered()
 
 @router.message(CommandStart(), not_registered)
 async def cmd_start_unregistered(message: Message, state: FSMContext) -> None:
-    """Handle /start for unregistered users — begin registration."""
     await state.clear()
     await state.set_state(RegistrationStates.waiting_for_email)
     await message.answer(
-        "Welcome! To get started, please register.\n\n"
-        "Send your Innopolis University email (e.g. <code>a.student@innopolis.university</code>):"
+        "Welcome! Please send your university email to register:"
     )
 
 
 @router.message(RegistrationStates.waiting_for_email)
 async def process_email(message: Message, state: FSMContext) -> None:
-    """Validate email and move to GitHub alias step."""
     email = message.text.strip().lower() if message.text else ""
 
     if not EMAIL_REGEX.match(email):
-        await message.answer(
-            "Invalid email. It must end with <code>@innopolis.university</code>.\n\nTry again:"
-        )
+        await message.answer("Invalid email format. Try again:")
         return
 
     if ALLOWED_EMAILS and email not in ALLOWED_EMAILS:
         await message.answer(
             "This email is not in the course roster.\n"
-            "Please use the email registered in Moodle.\n\nTry again:"
+            "Use the email registered with your university.\n\nTry again:"
         )
         return
 
@@ -67,9 +61,8 @@ async def process_email(message: Message, state: FSMContext) -> None:
     if existing and existing.tg_id != message.from_user.id:
         await state.clear()
         await message.answer(
-            "This email is already registered to another account.\n"
-            "Each email can only be used once (first-come-first-served).\n\n"
-            "Send /start to try again with a different email."
+            "This email is already registered to another Telegram account.\n"
+            "Send /start to try with a different email."
         )
         return
 
@@ -83,7 +76,6 @@ async def process_email(message: Message, state: FSMContext) -> None:
 
 @router.message(RegistrationStates.waiting_for_github)
 async def process_github(message: Message, state: FSMContext) -> None:
-    """Validate GitHub alias, create/update user, show tasks."""
     alias = message.text.strip().lstrip("@") if message.text else ""
 
     if not alias or not GITHUB_REGEX.match(alias):
@@ -92,19 +84,10 @@ async def process_github(message: Message, state: FSMContext) -> None:
         )
         return
 
-    existing = await get_user_by_github(alias)
-    if existing and existing.tg_id != message.from_user.id:
-        await state.clear()
-        await message.answer(
-            f"GitHub username <code>{alias}</code> is already registered to another account.\n"
-            "Each GitHub account can only be linked once (first-come-first-served).\n\n"
-            "Send /start to try again with a different username."
-        )
-        return
-
     data = await state.get_data()
     email = data["email"]
     tg_username = message.from_user.username or ""
+    full_name = message.from_user.full_name or ""
 
     try:
         await upsert_user(
@@ -116,30 +99,33 @@ async def process_github(message: Message, state: FSMContext) -> None:
         )
     except ValueError as e:
         await state.clear()
-        await message.answer(
-            f"{e}\n\nSend /start to try again."
-        )
+        await message.answer(f"{e}\n\nSend /start to try again.")
         return
 
-    await state.clear()
+    # Also link this tg_id to v2 API (fire-and-forget, non-blocking)
+    try:
+        await api_client.register_tg(
+            tg_id=message.from_user.id,
+            email=email,
+            full_name=full_name,
+        )
+    except Exception:
+        pass  # v2 link is best-effort; old lab flow still works via SQLite
 
+    await state.clear()
     await message.answer(
-        f"Registration complete!\n\n"
+        f"✅ Регистрация завершена!\n\n"
         f"Email: <code>{email}</code>\n"
         f"GitHub: <code>{alias}</code>\n\n"
-        "Choose a lab:",
+        "📋 Нажмите <b>Задания</b> чтобы увидеть актуальные задания.",
         reply_markup=get_labs_keyboard(),
     )
 
 
 @router.message(not_registered)
 async def catch_unregistered(message: Message, state: FSMContext) -> None:
-    """Catch any message from an unregistered user who is not in FSM flow."""
     await state.clear()
     await state.set_state(RegistrationStates.waiting_for_email)
     await message.answer(
-        "You are not registered yet. Let's fix that!\n\n"
-        "Send your Innopolis University email (e.g. <code>a.student@innopolis.university</code>):"
+        "You are not registered yet.\n\nSend your university email to get started:"
     )
-
-

@@ -71,8 +71,9 @@ export async function getStudents(): Promise<Response> {
   return fetch(`${BASE_URL}/teacher/students`, { headers: authHeaders() });
 }
 
-export async function getStudentDetails(studentId: string | number): Promise<Response> {
-  return fetch(`${BASE_URL}/teacher/students/${studentId}`, { headers: authHeaders() });
+export async function getStudentDetails(studentId: string | number, includeSummary = false): Promise<Response> {
+  const qs = includeSummary ? "?include_summary=true" : "";
+  return fetch(`${BASE_URL}/teacher/students/${studentId}${qs}`, { headers: authHeaders() });
 }
 
 export async function getTeacherSubmissions(assignmentId?: number): Promise<Response> {
@@ -84,6 +85,19 @@ export async function getTeacherSubmissions(assignmentId?: number): Promise<Resp
 
 export async function getTeacherAssignments(): Promise<Response> {
   return fetch(`${BASE_URL}/teacher/assignments`, { headers: authHeaders() });
+}
+
+export async function gradeSubmission(
+  submissionId: number,
+  score: number,
+  pass_fail: "pass" | "fail",
+  comment: string,
+): Promise<Response> {
+  return fetch(`${BASE_URL}/teacher/submissions/${submissionId}/grade`, {
+    method: "PATCH",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ score, pass_fail, comment }),
+  });
 }
 
 // Stats are computed locally from the students list — no separate /stats endpoint in v2
@@ -135,6 +149,10 @@ export async function askLlm(submissionId: number, question: string): Promise<Re
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────────────
+
+export async function getChatPartners(): Promise<Response> {
+  return fetch(`${BASE_URL}/chat/partners`, { headers: authHeaders() });
+}
 
 export async function getChatConversations(): Promise<Response> {
   return fetch(`${BASE_URL}/chat/conversations`, { headers: authHeaders() });

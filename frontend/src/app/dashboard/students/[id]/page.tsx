@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { getStudentDetails } from "@/lib/api";
+import { getStudentDetails, gradeSubmission } from "@/lib/api";
 
 // v2 API shapes
 interface StudentProfile {
@@ -86,9 +86,30 @@ export default function StudentDetailPage() {
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<number | null>(null);
 
+  // Grade form state keyed by submission id
+  const [gradeScore, setGradeScore] = useState<Record<number, string>>({});
+  const [gradePassFail, setGradePassFail] = useState<Record<number, "pass" | "fail">>({});
+  const [gradeComment, setGradeComment] = useState<Record<number, string>>({});
+  const [gradeSaving, setGradeSaving] = useState<Record<number, boolean>>({});
+
+  async function handleGrade(sub: Submission) {
+    // Fall back to existing submission values if user didn't touch the field
+    const rawScore = gradeScore[sub.id] ?? (sub.score != null ? String(Math.round(sub.score * 100)) : null);
+    const pf = gradePassFail[sub.id] ?? sub.pass_fail;
+    if (!rawScore || !pf) return;
+    const score = Math.min(100, Math.max(0, Number(rawScore))) / 100;
+    setGradeSaving((prev) => ({ ...prev, [sub.id]: true }));
+    const res = await gradeSubmission(sub.id, score, pf, gradeComment[sub.id] ?? "");
+    if (res.ok) {
+      const fresh = await getStudentDetails(id, true);
+      if (fresh.ok) setData(await fresh.json());
+    }
+    setGradeSaving((prev) => ({ ...prev, [sub.id]: false }));
+  }
+
   useEffect(() => {
     if (!id) return;
-    getStudentDetails(id)
+    getStudentDetails(id, true)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => { if (d) setData(d); })
       .finally(() => setLoading(false));
@@ -266,15 +287,13 @@ export default function StudentDetailPage() {
                         }}>
                           {sc.label}
                         </span>
-                        {checks.length > 0 && (
-                          <span style={{ fontSize: "18px", color: "var(--color-text-subtle)" }}>
-                            {isOpen ? "▲" : "▼"}
-                          </span>
-                        )}
+                        <span style={{ fontSize: "18px", color: "var(--color-text-subtle)" }}>
+                          {isOpen ? "▲" : "▼"}
+                        </span>
                       </div>
                     </div>
 
-                    {isOpen && checks.length > 0 && (
+                    {isOpen && (
                       <div style={{ padding: "0 24px 16px", backgroundColor: "var(--color-card-alt)" }}>
                         {sub.feedback_json?.summary && (
                           <p style={{ fontSize: "14px", color: "var(--color-text-muted)", marginBottom: "10px", fontStyle: "italic" }}>
@@ -305,6 +324,102 @@ export default function StudentDetailPage() {
                             </div>
                           </div>
                         ))}
+
+                        {/* Teacher grading form */}
+                        <div style={{
+                          marginTop: "16px", padding: "16px",
+                          backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)",
+                          borderRadius: "10px",
+                        }}>
+                          <p style={{ fontSize: "13px", fontWeight: 700, color: "var(--color-text-subtle)", textTransform: "uppercase", letterSpacing: "0.5px", margin: "0 0 12px" }}>
+                            Оценка преподавателя
+                          </p>
+                          <div style={{ display: "flex", gap: "10px", alignItems: "flex-end", flexWrap: "wrap" }}>
+                            {/* Score field */}
+                            <div>
+                              <label style={{ fontSize: "12px", color: "var(--color-text-subtle)", display: "block", marginBottom: "4px" }}>
+                                Балл (0–100)
+                              </label>
+                              <input
+                                type="number" min={0} max={100}
+                                value={gradeScore[sub.id] ?? (sub.score != null ? Math.round(sub.score * 100).toString() : "")}
+                                onChange={(e) => setGradeScore((prev) => ({ ...prev, [sub.id]: e.target.value }))}
+                                onClick={(e) => e.stopPropagation()}
+                                style={{
+                                  width: "80px", height: "36px", borderRadius: "8px",
+                                  border: "1.5px solid var(--color-border-input)",
+                                  padding: "0 10px", fontSize: "14px",
+                                  color: "var(--color-text-primary)", backgroundColor: "var(--color-card)",
+                                  outline: "none",
+                                }}
+                              />
+                            </div>
+
+                            {/* Pass / Fail toggle */}
+                            <div>
+                              <label style={{ fontSize: "12px", color: "var(--color-text-subtle)", display: "block", marginBottom: "4px" }}>
+                                Результат
+                              </label>
+                              <div style={{ display: "flex", gap: "6px" }}>
+                                {(["pass", "fail"] as const).map((pf) => {
+                                  const active = (gradePassFail[sub.id] ?? sub.pass_fail) === pf;
+                                  return (
+                                    <button
+                                      key={pf}
+                                      onClick={(e) => { e.stopPropagation(); setGradePassFail((prev) => ({ ...prev, [sub.id]: pf })); }}
+                                      style={{
+                                        height: "36px", padding: "0 14px", borderRadius: "8px",
+                                        border: active ? "none" : "1.5px solid var(--color-border-input)",
+                                        backgroundColor: active ? (pf === "pass" ? "#0e3e12" : "#8f0000") : "var(--color-card)",
+                                        color: active ? "white" : "var(--color-text-muted)",
+                                        fontSize: "13px", fontWeight: 600, cursor: "pointer",
+                                      }}
+                                    >
+                                      {pf === "pass" ? "Сдано" : "Не сдано"}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+
+                            {/* Comment */}
+                            <div style={{ flex: 1, minWidth: "140px" }}>
+                              <label style={{ fontSize: "12px", color: "var(--color-text-subtle)", display: "block", marginBottom: "4px" }}>
+                                Комментарий (необязательно)
+                              </label>
+                              <input
+                                type="text"
+                                value={gradeComment[sub.id] ?? ""}
+                                onChange={(e) => setGradeComment((prev) => ({ ...prev, [sub.id]: e.target.value }))}
+                                onClick={(e) => e.stopPropagation()}
+                                placeholder="Краткий комментарий..."
+                                style={{
+                                  width: "100%", height: "36px", borderRadius: "8px",
+                                  border: "1.5px solid var(--color-border-input)",
+                                  padding: "0 10px", fontSize: "13px",
+                                  color: "var(--color-text-primary)", backgroundColor: "var(--color-card)",
+                                  outline: "none", boxSizing: "border-box",
+                                }}
+                              />
+                            </div>
+
+                            {/* Save button */}
+                            <button
+                              onClick={(e) => { e.stopPropagation(); handleGrade(sub); }}
+                              disabled={gradeSaving[sub.id] || !(gradePassFail[sub.id] ?? sub.pass_fail) || !(gradeScore[sub.id] ?? (sub.score != null ? "x" : null))}
+                              style={{
+                                height: "36px", padding: "0 18px", borderRadius: "8px",
+                                backgroundColor: "var(--color-btn-primary-bg)",
+                                color: "var(--color-btn-primary-color)",
+                                border: "none", fontSize: "13px", fontWeight: 700,
+                                cursor: "pointer", flexShrink: 0,
+                                opacity: gradeSaving[sub.id] ? 0.6 : 1,
+                              }}
+                            >
+                              {gradeSaving[sub.id] ? "..." : "Выставить оценку"}
+                            </button>
+                          </div>
+                        </div>
                       </div>
                     )}
                   </div>

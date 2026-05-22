@@ -5,17 +5,31 @@ Abstract LLM adapter. Select provider via LLM_PROVIDER env var:
   google    → Google Generative AI (Gemini)
 
 Set LLM_BASE_URL to override the API endpoint (useful for Qwen/local models).
+Set LLM_MODELS to a comma-separated list for automatic fallback when a model
+is rate-limited or unavailable (e.g. openrouter free-tier models).
 """
 
 import json
+import logging
 import os
 from abc import ABC, abstractmethod
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openai")
 LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4o")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "")
+
+# Comma-separated list of models to try in order (first one is primary).
+# If LLM_MODELS is not set, falls back to LLM_MODEL.
+_raw_models = os.environ.get("LLM_MODELS", "")
+LLM_MODELS: list[str] = (
+    [m.strip() for m in _raw_models.split(",") if m.strip()]
+    if _raw_models
+    else [LLM_MODEL]
+)
 
 
 class LLMAdapter(ABC):
@@ -25,14 +39,14 @@ class LLMAdapter(ABC):
 
 
 class OpenAICompatibleAdapter(LLMAdapter):
-    """Works with OpenAI and any OpenAI-compatible endpoint (Qwen, Together, etc.)."""
+    """Works with OpenAI and any OpenAI-compatible endpoint (Qwen, Together, etc.).
+    Tries each model in LLM_MODELS in order; skips on 404/429/503.
+    """
 
     def __init__(self):
         import httpx
-        # client is module-level singleton — closed on app shutdown via lifespan
         self._client = httpx.AsyncClient(timeout=120)
         self._base = (LLM_BASE_URL or "https://api.openai.com/v1").rstrip("/")
-        self._model = LLM_MODEL
         self._headers = {
             "Authorization": f"Bearer {LLM_API_KEY}",
             "Content-Type": "application/json",
@@ -42,20 +56,52 @@ class OpenAICompatibleAdapter(LLMAdapter):
         }
 
     async def complete(self, system: str, user: str) -> str:
-        resp = await self._client.post(
-            f"{self._base}/chat/completions",
-            headers=self._headers,
-            json={
-                "model": self._model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "temperature": 0.2,
-            },
-        )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
+        last_error: Exception | None = None
+
+        for model in LLM_MODELS:
+            try:
+                resp = await self._client.post(
+                    f"{self._base}/chat/completions",
+                    headers=self._headers,
+                    json={
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": user},
+                        ],
+                        "temperature": 0.2,
+                    },
+                )
+
+                if resp.status_code in (404, 429, 503):
+                    logger.warning(
+                        "Model %s returned %s, trying next fallback",
+                        model, resp.status_code,
+                    )
+                    last_error = Exception(
+                        f"Model {model} returned HTTP {resp.status_code}"
+                    )
+                    continue
+
+                resp.raise_for_status()
+                content = resp.json()["choices"][0]["message"]["content"]
+                if content is None:
+                    # Reasoning-only models return content=null
+                    logger.warning("Model %s returned null content, trying next", model)
+                    last_error = Exception(f"Model {model} returned null content")
+                    continue
+
+                logger.info("LLM response from model: %s", model)
+                return content
+
+            except Exception as exc:
+                if "404" in str(exc) or "429" in str(exc) or "503" in str(exc):
+                    logger.warning("Model %s failed (%s), trying next", model, exc)
+                    last_error = exc
+                    continue
+                raise
+
+        raise last_error or RuntimeError("All LLM models failed")
 
 
 class AnthropicAdapter(LLMAdapter):
@@ -112,7 +158,6 @@ def extract_json(text: str) -> Any:
     start = text.find("{") if "{" in text else text.find("[")
     if start == -1:
         raise ValueError("No JSON found in LLM output")
-    # find matching bracket
     bracket = text[start]
     close = "}" if bracket == "{" else "]"
     depth = 0

@@ -97,3 +97,4 @@ class BotSubmitRequest(BaseModel):
 class BotRegisterRequest(BaseModel):
     tg_id: int
     email: str
+    full_name: str = ""

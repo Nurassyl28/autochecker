@@ -26,8 +26,9 @@ async def cmd_start(message: Message, db_user: User, state: FSMContext) -> None:
     await state.clear()
     server_ip = await get_server_ip(db_user.tg_id)
     await message.answer(
-        f"Welcome, {db_user.github_alias}!\n\n"
-        "Choose a lab:",
+        f"Привет, <b>{db_user.github_alias}</b>!\n\n"
+        "📋 Нажмите <b>Задания</b> чтобы увидеть актуальные задания.\n"
+        "Или используйте команду /assignments.",
         reply_markup=get_labs_keyboard(server_ip=server_ip),
     )
 
@@ -38,6 +39,6 @@ async def catch_all_registered(message: Message, db_user: User, state: FSMContex
     await state.clear()
     server_ip = await get_server_ip(db_user.tg_id)
     await message.answer(
-        "Choose a lab:",
+        "Выберите раздел:",
         reply_markup=get_labs_keyboard(server_ip=server_ip),
     )

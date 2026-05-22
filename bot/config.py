@@ -11,15 +11,20 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
-# Bot configuration
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+# Bot configuration — try both env var names
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN environment variable is not set")
+    raise ValueError("TELEGRAM_BOT_TOKEN environment variable is not set")
 
 # Database configuration
+# The bot uses its own SQLite DB; BOT_DATABASE_URL overrides with Postgres only if explicitly set.
+# We intentionally do NOT share the main DATABASE_URL (that belongs to the v2 API).
 DB_PATH = os.getenv("DB_PATH", "bot.db")
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+DATABASE_URL = os.getenv("BOT_DATABASE_URL", "").strip()
 DEFAULT_TENANT_ID = os.getenv("DEFAULT_TENANT_ID", "default").strip() or "default"
+
+# v2 API base URL (for assignment submissions via HTTP)
+API_URL = os.getenv("API_URL", "http://localhost:8000").rstrip("/")
 
 # Project paths — resolved from monorepo root
 BASE_DIR = Path(__file__).resolve().parent.parent

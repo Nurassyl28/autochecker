@@ -1,13 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Image from "next/image";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { getStudents, getMyData } from "@/lib/api";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-// v2 teacher student row
 interface StudentRow {
   id: number;
   email: string;
@@ -19,7 +18,6 @@ interface StudentRow {
   total_tasks?: number;
 }
 
-// v2 assignment (for student view)
 interface Assignment {
   id: number;
   title: string;
@@ -28,13 +26,13 @@ interface Assignment {
   created_at: string;
 }
 
-// v2 submission (for student view)
 interface Submission {
   id: number;
   assignment_id: number;
   status: string;
   pass_fail: "pass" | "fail" | null;
   score: number | null;
+  feedback_json: Record<string, unknown> | null;
   created_at: string;
 }
 
@@ -44,24 +42,33 @@ function displayName(s: StudentRow) {
   return s.full_name || s.email.split("@")[0];
 }
 
-function studentBadge(s: StudentRow) {
-  const p = s.progress ?? 0;
-  if (p >= 70) return { label: "Активен", bg: "#ecfdf5", border: "#b5f5d7", color: "#0e3e12" };
-  if (p >= 30) return { label: "Нужна помощь", bg: "#fffbeb", border: "#fde372", color: "#af3f00" };
-  return { label: "В стопоре", bg: "#fef2f2", border: "#fec7c7", color: "#8f0000" };
+function getTaskStatus(sub?: Submission): "none" | "in_progress" | "passed" | "failed" {
+  if (!sub) return "none";
+  if (sub.status === "done" && sub.pass_fail === "pass") return "passed";
+  if (sub.status === "done" && sub.pass_fail === "fail") return "failed";
+  return "in_progress";
 }
 
-function submissionStatusLabel(status: string, pass_fail: string | null) {
-  if (status === "done" && pass_fail === "pass") return { label: "Выполнено", bg: "#ecfdf5", color: "#0e3e12" };
-  if (status === "done" && pass_fail === "fail") return { label: "Не сдано",  bg: "#fef2f2", color: "#8f0000" };
-  if (status === "processing" || status === "pending") return { label: "В процессе", bg: "#eef2ff", color: "#3332ce" };
-  if (status === "error") return { label: "Ошибка", bg: "#fff3e0", color: "#e65100" };
-  return { label: "—", bg: "#f1f1f1", color: "#555" };
+function getInitials(name: string) {
+  const parts = name.trim().split(/\s+/);
+  return parts.length >= 2
+    ? (parts[0][0] + parts[1][0]).toUpperCase()
+    : name.slice(0, 2).toUpperCase();
 }
+
+const AVATAR_PALETTE = [
+  { bg: "#e8e4f0", color: "#5566cc" },
+  { bg: "#fce4ec", color: "#c62828" },
+  { bg: "#e3f2fd", color: "#1565c0" },
+  { bg: "#e8f5e9", color: "#2e7d32" },
+  { bg: "#fff3e0", color: "#e65100" },
+  { bg: "#f3e5f5", color: "#6a1b9a" },
+];
 
 // ── Student Dashboard ──────────────────────────────────────────────────────────
 
 function StudentHome() {
+  const router = useRouter();
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [loading, setLoading] = useState(true);
@@ -75,27 +82,23 @@ function StudentHome() {
       .finally(() => setLoading(false));
   }, []);
 
-  const name = sessionStorage.getItem("user_name") || "Студент";
+  const name = (typeof window !== "undefined" ? sessionStorage.getItem("user_name") : null) || "Студент";
 
-  // Map assignment → latest submission for status
   const latestSub = (assignmentId: number): Submission | undefined =>
     submissions
       .filter((s) => s.assignment_id === assignmentId)
       .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0];
 
-  const passedCount = assignments.filter((a) => {
+  const passedCount = assignments.filter((a) => latestSub(a.id)?.pass_fail === "pass").length;
+  const inProgressCount = assignments.filter((a) => {
     const sub = latestSub(a.id);
-    return sub?.pass_fail === "pass";
+    return sub && sub.status !== "done";
   }).length;
 
+  const doneScores = submissions.filter((s) => s.status === "done" && s.score != null).map((s) => s.score as number);
+  const avgScore = doneScores.length ? Math.round((doneScores.reduce((a, b) => a + b, 0) / doneScores.length) * 100) : 0;
   const progress = assignments.length > 0 ? Math.round((passedCount / assignments.length) * 100) : 0;
-
-  const doneScores = submissions
-    .filter((s) => s.status === "done" && s.score != null)
-    .map((s) => s.score as number);
-  const avgScore = doneScores.length
-    ? Math.round((doneScores.reduce((a, b) => a + b, 0) / doneScores.length) * 100)
-    : 0;
+  const starRating = passedCount * 100 + avgScore;
 
   if (loading) {
     return (
@@ -106,23 +109,23 @@ function StudentHome() {
   }
 
   return (
-    <div style={{ padding: "43px 45px 40px 45px", backgroundColor: "var(--color-bg)", minHeight: "100%" }}>
+    <div style={{ padding: "40px 48px", backgroundColor: "var(--color-bg)", minHeight: "100%" }}>
       {/* Header */}
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: "32px" }}>
         <div>
-          <h1 style={{ fontSize: "40px", fontWeight: 700, color: "var(--color-text-primary)", margin: 0, lineHeight: "1.2" }}>
-            С возвращением, {name}!
+          <h1 style={{ fontSize: "38px", fontWeight: 700, color: "var(--color-text-primary)", margin: "0 0 8px" }}>
+            С возвращением, {name.split(" ")[0]}!
           </h1>
-          <p style={{ fontSize: "18px", color: "var(--color-text-muted)", margin: "10px 0 0" }}>
+          <p style={{ fontSize: "16px", color: "var(--color-text-muted)", margin: 0 }}>
             {assignments.length > 0
-              ? `У вас ${assignments.length} заданий.`
-              : "Задания не назначены."}
+              ? `Продолжайте обучение. У вас ${assignments.length} задан${assignments.length === 1 ? "ие" : "ий"} в курсе.`
+              : "Задания не назначены. Обратитесь к преподавателю."}
           </p>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-          <Image src="/assets/icons/star-icon.png" alt="" width={39} height={39} className="object-contain" />
-          <span style={{ fontSize: "31px", fontWeight: 600, color: "var(--color-text-primary)" }}>
-            {passedCount * 100}
+        <div style={{ display: "flex", alignItems: "center", gap: "8px", flexShrink: 0 }}>
+          <span style={{ fontSize: "28px" }}>★</span>
+          <span style={{ fontSize: "28px", fontWeight: 700, color: "var(--color-text-primary)" }}>
+            {starRating}
           </span>
         </div>
       </div>
@@ -130,48 +133,126 @@ function StudentHome() {
       <div style={{ display: "flex", gap: "24px" }}>
         {/* Assignments list */}
         <div style={{ flex: 1 }}>
-          <h2 style={{ fontSize: "22px", fontWeight: 600, marginBottom: "16px", color: "var(--color-text-primary)" }}>
+          <h2 style={{ fontSize: "20px", fontWeight: 600, marginBottom: "16px", color: "var(--color-text-primary)" }}>
             Ваши задания
           </h2>
 
           {assignments.length === 0 ? (
             <div style={{
               backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)",
-              borderRadius: "8px", padding: "32px 24px", textAlign: "center", color: "var(--color-text-subtle)",
+              borderRadius: "12px", padding: "40px 24px", textAlign: "center", color: "var(--color-text-subtle)", fontSize: "16px",
             }}>
-              <p style={{ fontSize: "18px", margin: 0 }}>Задания не найдены. Данные появятся после добавления администратором.</p>
+              Задания не найдены. Дождитесь назначения от преподавателя.
             </div>
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
               {assignments.map((a) => {
                 const sub = latestSub(a.id);
-                const badge = submissionStatusLabel(sub?.status ?? "none", sub?.pass_fail ?? null);
-                const score = sub?.score != null ? `${Math.round(sub.score * 100)}%` : null;
+                const taskStatus = getTaskStatus(sub);
+                const score = sub?.score != null ? Math.round(sub.score * 10) : null;
+
+                const isPassed = taskStatus === "passed";
+                const isFailed = taskStatus === "failed";
+                const isInProgress = taskStatus === "in_progress";
+
+                const cardStyle: React.CSSProperties = {
+                  backgroundColor: isFailed ? "#fff5f5" : "var(--color-card)",
+                  border: isFailed ? "1px solid #fcd0d0" : "1px solid var(--color-border-card)",
+                  borderLeft: isFailed ? "4px solid #e53e3e" : "1px solid var(--color-border-card)",
+                  borderRadius: "12px",
+                  padding: "18px 20px",
+                  cursor: sub ? "pointer" : "default",
+                };
+
+                const feedbackText = sub?.feedback_json
+                  ? typeof sub.feedback_json === "object" && "summary" in sub.feedback_json
+                    ? String(sub.feedback_json.summary)
+                    : null
+                  : null;
+
                 return (
-                  <div key={a.id} style={{
-                    backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)",
-                    borderRadius: "8px", padding: "14px 20px",
-                    display: "flex", alignItems: "center", justifyContent: "space-between", gap: "16px",
-                  }}>
-                    <div style={{ flex: 1 }}>
-                      <p style={{ fontSize: "16px", fontWeight: 500, color: "var(--color-text-primary)", margin: "0 0 4px" }}>
-                        {a.title}
-                      </p>
-                      <span style={{ fontSize: "13px", color: "var(--color-text-subtle)" }}>
-                        {a.created_at.slice(0, 10)}
-                      </span>
-                    </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: "12px", flexShrink: 0 }}>
-                      {score && (
-                        <span style={{ fontSize: "15px", fontWeight: 700, color: "var(--color-accent)" }}>{score}</span>
+                  <div
+                    key={a.id}
+                    style={cardStyle}
+                    onClick={() => sub && router.push(`/dashboard/submissions/${sub.id}`)}
+                  >
+                    {/* Top row: status badge + date */}
+                    <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "10px" }}>
+                      {taskStatus === "none" && (
+                        <span style={{ fontSize: "12px", fontWeight: 600, padding: "3px 12px", borderRadius: "20px", backgroundColor: "#f3f4f6", color: "#6b7280" }}>
+                          Не начато
+                        </span>
                       )}
-                      <span style={{
-                        backgroundColor: badge.bg, color: badge.color,
-                        borderRadius: "14px", padding: "3px 12px",
-                        fontSize: "13px", fontWeight: 500,
-                      }}>
-                        {badge.label}
-                      </span>
+                      {isInProgress && (
+                        <span style={{ fontSize: "12px", fontWeight: 600, padding: "3px 12px", borderRadius: "20px", backgroundColor: "#eef2ff", color: "#3730a3" }}>
+                          ⏳ В процессе
+                        </span>
+                      )}
+                      {isFailed && (
+                        <span style={{ fontSize: "12px", fontWeight: 600, padding: "3px 12px", borderRadius: "20px", backgroundColor: "#fee2e2", color: "#b91c1c" }}>
+                          ⚠️ Нужно исправить
+                        </span>
+                      )}
+                      {isPassed && (
+                        <span style={{ fontSize: "12px", fontWeight: 600, padding: "3px 12px", borderRadius: "20px", backgroundColor: "#dcfce7", color: "#15803d" }}>
+                          ✅ Выполнено
+                        </span>
+                      )}
+                      {isPassed && score != null && (
+                        <span style={{ fontSize: "12px", color: "var(--color-text-muted)" }}>
+                          🕐 Оценка: {score}/10
+                        </span>
+                      )}
+                      {isFailed && sub && (
+                        <span style={{ fontSize: "12px", color: "#b91c1c" }}>
+                          ⚠️ Требует доработки
+                        </span>
+                      )}
+                      {isInProgress && sub && (
+                        <span style={{ fontSize: "12px", color: "var(--color-text-muted)" }}>
+                          🕐 {new Date(sub.created_at).toLocaleDateString("ru-RU")}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Title + action */}
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "16px" }}>
+                      <div style={{ flex: 1 }}>
+                        <p style={{
+                          fontSize: "17px", fontWeight: 600, margin: "0 0 4px",
+                          color: isPassed ? "var(--color-text-muted)" : "var(--color-text-primary)",
+                          textDecoration: isPassed ? "line-through" : "none",
+                        }}>
+                          {a.title}
+                        </p>
+                        {isFailed && feedbackText && (
+                          <p style={{ fontSize: "13px", color: "#b91c1c", margin: 0, lineHeight: "1.45" }}>
+                            {feedbackText.slice(0, 120)}{feedbackText.length > 120 ? "..." : ""}
+                          </p>
+                        )}
+                        {isFailed && !feedbackText && (
+                          <p style={{ fontSize: "13px", color: "#b91c1c", margin: 0 }}>
+                            AI-тьютор обнаружил ошибки. Нажмите для подробностей.
+                          </p>
+                        )}
+                        {taskStatus === "none" && a.description_text && (
+                          <p style={{ fontSize: "13px", color: "var(--color-text-subtle)", margin: 0, lineHeight: "1.45" }}>
+                            {a.description_text.slice(0, 100)}{a.description_text.length > 100 ? "..." : ""}
+                          </p>
+                        )}
+                      </div>
+                      {(isInProgress || taskStatus === "none") && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); router.push(`/dashboard/submissions/${sub?.id ?? 0}`); }}
+                          style={{
+                            height: "36px", padding: "0 18px", borderRadius: "8px", flexShrink: 0,
+                            backgroundColor: "var(--color-btn-primary-bg)", color: "var(--color-btn-primary-color)",
+                            border: "none", fontSize: "13px", fontWeight: 600, cursor: "pointer",
+                          }}
+                        >
+                          {isInProgress ? "Продолжить" : "Открыть"}
+                        </button>
+                      )}
                     </div>
                   </div>
                 );
@@ -180,54 +261,66 @@ function StudentHome() {
           )}
         </div>
 
-        {/* Progress sidebar */}
+        {/* Progress panel */}
         <div style={{
-          width: "337px", flexShrink: 0,
+          width: "300px", flexShrink: 0,
           backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)",
-          borderRadius: "15px", padding: "24px 24px 20px",
+          borderRadius: "14px", padding: "24px",
         }}>
-          <h3 style={{ fontSize: "22px", fontWeight: 600, margin: "0 0 24px", color: "var(--color-text-primary)" }}>
-            Мои результаты
+          <h3 style={{ fontSize: "18px", fontWeight: 700, margin: "0 0 24px", color: "var(--color-text-primary)" }}>
+            Общий прогресс
           </h3>
+
+          {/* Donut chart */}
           <div style={{ display: "flex", justifyContent: "center", marginBottom: "20px" }}>
-            <div style={{ position: "relative", width: "129px", height: "126px" }}>
-              <svg width="129" height="126" viewBox="0 0 129 126">
-                <circle cx="64" cy="63" r="54" fill="none" stroke="var(--color-border)" strokeWidth="12" />
-                <circle cx="64" cy="63" r="54" fill="none" stroke="var(--color-progress-active)" strokeWidth="12"
-                  strokeDasharray={`${2 * Math.PI * 54 * (progress / 100)} ${2 * Math.PI * 54}`}
-                  strokeDashoffset={2 * Math.PI * 54 * 0.25} strokeLinecap="round" />
+            <div style={{ position: "relative", width: "120px", height: "120px" }}>
+              <svg width="120" height="120" viewBox="0 0 120 120">
+                <circle cx="60" cy="60" r="48" fill="none" stroke="var(--color-border)" strokeWidth="11" />
+                <circle
+                  cx="60" cy="60" r="48" fill="none"
+                  stroke="var(--color-progress-active)" strokeWidth="11"
+                  strokeDasharray={`${2 * Math.PI * 48 * (progress / 100)} ${2 * Math.PI * 48}`}
+                  strokeDashoffset={2 * Math.PI * 48 * 0.25}
+                  strokeLinecap="round"
+                />
               </svg>
-              <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)", textAlign: "center" }}>
-                <div style={{ fontSize: "26px", fontWeight: 500, color: "var(--color-text-primary)" }}>
-                  {progress > 0 ? `${progress}%` : "—"}
+              <div style={{
+                position: "absolute", top: "50%", left: "50%",
+                transform: "translate(-50%, -50%)", textAlign: "center",
+              }}>
+                <div style={{ fontSize: "22px", fontWeight: 700, color: "var(--color-text-primary)", lineHeight: 1 }}>
+                  {progress}%
                 </div>
-                <div style={{ fontSize: "14px", color: "var(--color-text-muted)" }}>Прогресс</div>
+                <div style={{ fontSize: "12px", color: "var(--color-text-muted)", marginTop: "2px" }}>Курса</div>
               </div>
             </div>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
-            <div style={{ backgroundColor: "var(--color-card-subtle)", borderRadius: "7px", padding: "14px 16px", textAlign: "center" }}>
-              <div style={{ fontSize: "27px", fontWeight: 600, color: "var(--color-accent)" }}>
-                {avgScore > 0 ? `${avgScore}%` : "—"}
-              </div>
-              <div style={{ fontSize: "14px", color: "var(--color-text-muted)", marginTop: "4px" }}>Средний балл</div>
-            </div>
-            <div style={{ backgroundColor: "var(--color-card-subtle)", borderRadius: "7px", padding: "14px 16px", textAlign: "center" }}>
-              <div style={{ fontSize: "27px", fontWeight: 600, color: "var(--color-accent)" }}>
-                {passedCount} / {assignments.length}
-              </div>
-              <div style={{ fontSize: "14px", color: "var(--color-text-muted)", marginTop: "4px" }}>Выполнено</div>
-            </div>
-          </div>
-          <div style={{ marginTop: "16px" }}>
-            <Link href="/dashboard/chat" style={{
-              display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
-              backgroundColor: "var(--color-btn-primary-bg)", color: "var(--color-btn-primary-color)",
-              textDecoration: "none", borderRadius: "10px", height: "42px", fontSize: "15px", fontWeight: 500,
+
+          {/* Stats */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginBottom: "16px" }}>
+            <div style={{
+              backgroundColor: "var(--color-card-subtle)", borderRadius: "10px",
+              padding: "14px 12px", textAlign: "center",
             }}>
-              💬 Написать преподавателю
-            </Link>
+              <div style={{ fontSize: "26px", fontWeight: 700, color: "var(--color-accent)" }}>{passedCount}</div>
+              <div style={{ fontSize: "12px", color: "var(--color-text-muted)", marginTop: "2px", lineHeight: "1.3" }}>Решено задач</div>
+            </div>
+            <div style={{
+              backgroundColor: "var(--color-card-subtle)", borderRadius: "10px",
+              padding: "14px 12px", textAlign: "center",
+            }}>
+              <div style={{ fontSize: "26px", fontWeight: 700, color: "var(--color-accent)" }}>{inProgressCount}</div>
+              <div style={{ fontSize: "12px", color: "var(--color-text-muted)", marginTop: "2px", lineHeight: "1.3" }}>В работе</div>
+            </div>
           </div>
+
+          <Link href="/dashboard/chat" style={{
+            display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
+            backgroundColor: "var(--color-btn-primary-bg)", color: "var(--color-btn-primary-color)",
+            textDecoration: "none", borderRadius: "10px", height: "40px", fontSize: "14px", fontWeight: 600,
+          }}>
+            💬 Написать преподавателю
+          </Link>
         </div>
       </div>
     </div>
@@ -238,8 +331,10 @@ function StudentHome() {
 
 function TeacherHome() {
   const [students, setStudents] = useState<StudentRow[]>([]);
-  const [topSearch, setTopSearch] = useState("");
+  const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
+
+  const teacherName = typeof window !== "undefined" ? sessionStorage.getItem("user_name") || "Преподаватель" : "Преподаватель";
 
   useEffect(() => {
     getStudents()
@@ -248,30 +343,42 @@ function TeacherHome() {
       .finally(() => setLoading(false));
   }, []);
 
-  // Compute stats from students list
   const total = students.length;
-  const activeCount = students.filter((s) => (s.progress ?? 0) >= 70).length;
-  const stuckCount  = students.filter((s) => (s.progress ?? 0) < 30).length;
+  const problemCount = students.filter((s) => (s.progress ?? 0) < 50 && (s.total_tasks ?? 0) > 0).length;
+  const stuckCount = students.filter((s) => (s.progress ?? 0) < 30).length;
   const avgPerf = students.length > 0
     ? Math.round(students.reduce((sum, s) => sum + (s.avg_score ?? 0), 0) / students.length)
     : 0;
 
   const statCards = [
-    { label: "Всего студентов",    value: String(total),     iconBg: "#efedf4", icon: "/assets/icons/people-icon.png" },
-    { label: "Активные",          value: String(activeCount), iconBg: "#dfe0ff", icon: "/assets/icons/signal-icon.png" },
-    { label: "В стопоре",         value: String(stuckCount),  iconBg: "#ffdbc7", icon: "/assets/icons/historical-icon.png" },
-    { label: "Средняя успеваемость", value: `${avgPerf}%`,   iconBg: "#dfe0ff", icon: "/assets/icons/signal-icon.png" },
+    {
+      label: "ВСЕГО СТУДЕНТОВ", value: String(total),
+      iconBg: "#efedf4", icon: "👥",
+    },
+    {
+      label: "АКТИВНЫЕ ПРОБЛЕМЫ", value: String(problemCount),
+      iconBg: "#ffe4e6", icon: "⚠️",
+    },
+    {
+      label: "В СТОПОРЕ", value: String(stuckCount),
+      iconBg: "#ffedd5", icon: "⏱️",
+    },
+    {
+      label: "СРЕДНЯЯ УСПЕВАЕМОСТЬ", value: `${avgPerf}%`,
+      iconBg: "#dbeafe", icon: "📊",
+    },
   ];
 
-  // Students needing attention: low progress
-  const attention = students.slice(0, 5);
+  const needsAttention = students
+    .filter((s) => (s.progress ?? 0) < 50)
+    .slice(0, 5);
 
-  const filtered = topSearch
-    ? attention.filter((s) =>
-        displayName(s).toLowerCase().includes(topSearch.toLowerCase()) ||
-        s.email.toLowerCase().includes(topSearch.toLowerCase())
+  const filteredAttention = search
+    ? needsAttention.filter((s) =>
+        displayName(s).toLowerCase().includes(search.toLowerCase()) ||
+        s.email.toLowerCase().includes(search.toLowerCase())
       )
-    : attention;
+    : needsAttention;
 
   if (loading) {
     return (
@@ -285,123 +392,137 @@ function TeacherHome() {
     <div style={{ backgroundColor: "var(--color-bg-alt)", minHeight: "100%" }}>
       {/* Top bar */}
       <div style={{
-        height: "70px", backgroundColor: "var(--color-topbar)", borderBottom: "1px solid var(--color-border)",
-        display: "flex", alignItems: "center", padding: "0 45px", gap: "16px",
+        height: "64px", backgroundColor: "var(--color-card)",
+        borderBottom: "1px solid var(--color-border)",
+        display: "flex", alignItems: "center", padding: "0 40px", gap: "16px",
       }}>
         <div style={{
-          flex: 1, maxWidth: "504px", backgroundColor: "var(--color-card-input)",
-          borderRadius: "8px", height: "43px", display: "flex", alignItems: "center", gap: "10px", padding: "0 14px",
+          flex: 1, maxWidth: "480px", backgroundColor: "var(--color-card-input)",
+          borderRadius: "8px", height: "40px",
+          display: "flex", alignItems: "center", gap: "10px", padding: "0 14px",
         }}>
-          <Image src="/assets/icons/search-icon.png" alt="" width={22} height={22} className="object-contain" />
+          <span style={{ fontSize: "16px", color: "var(--color-text-muted)" }}>🔍</span>
           <input
-            value={topSearch}
-            onChange={(e) => setTopSearch(e.target.value)}
-            placeholder="Поиск студентов..."
-            style={{ border: "none", outline: "none", background: "transparent", fontSize: "16px", color: "var(--color-text-muted)", flex: 1 }}
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Поиск студентов и заданий"
+            style={{ border: "none", outline: "none", background: "transparent", fontSize: "14px", color: "var(--color-text-muted)", flex: 1 }}
           />
         </div>
-        <div style={{ marginLeft: "auto" }}>
-          <Image src="/assets/icons/doorbell-icon.png" alt="" width={26} height={26} className="object-contain" />
+        <div style={{ marginLeft: "auto", display: "flex", gap: "12px", alignItems: "center" }}>
+          <span style={{ fontSize: "20px", cursor: "pointer", color: "var(--color-text-muted)" }}>🔔</span>
+          <span style={{ fontSize: "20px", cursor: "pointer", color: "var(--color-text-muted)" }}>❓</span>
         </div>
       </div>
 
-      <div style={{ padding: "43px 45px 0" }}>
-        <h1 style={{ fontSize: "40px", fontWeight: 700, color: "var(--color-text-primary)", margin: "0 0 8px" }}>
-          Добро пожаловать!
+      <div style={{ padding: "36px 40px 40px" }}>
+        {/* Greeting */}
+        <h1 style={{ fontSize: "36px", fontWeight: 700, color: "var(--color-text-primary)", margin: "0 0 8px" }}>
+          Добро пожаловать, {teacherName}
         </h1>
-        <p style={{ fontSize: "18px", color: "var(--color-text-light)", margin: "0 0 32px" }}>
+        <p style={{ fontSize: "16px", color: "var(--color-text-muted)", margin: "0 0 28px" }}>
           Вот краткий обзор текущей активности ваших студентов.
         </p>
 
         {/* Stats */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "18px", marginBottom: "28px" }}>
-          {statCards.map((s) => (
-            <div key={s.label} style={{
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "16px", marginBottom: "28px" }}>
+          {statCards.map((s, i) => (
+            <div key={i} style={{
               backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)",
-              borderRadius: "15px", padding: "24px 20px 20px", position: "relative",
+              borderRadius: "14px", padding: "20px 18px",
+              display: "flex", flexDirection: "column", gap: "0",
             }}>
-              <div style={{
-                position: "absolute", top: "18px", right: "18px",
-                backgroundColor: s.iconBg, borderRadius: "9px", width: "44px", height: "44px",
-                display: "flex", alignItems: "center", justifyContent: "center",
-              }}>
-                <Image src={s.icon} alt="" width={22} height={22} className="object-contain" />
+              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: "16px" }}>
+                <p style={{ fontSize: "11px", fontWeight: 600, color: "var(--color-text-muted)", textTransform: "uppercase", letterSpacing: "0.5px", margin: 0, maxWidth: "100px", lineHeight: "1.3" }}>
+                  {s.label}
+                </p>
+                <div style={{
+                  width: "40px", height: "40px", borderRadius: "8px",
+                  backgroundColor: s.iconBg,
+                  display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: "20px",
+                }}>
+                  {s.icon}
+                </div>
               </div>
-              <p style={{ fontSize: "15px", fontWeight: 500, color: "var(--color-text-light)", textTransform: "uppercase", margin: "0 0 48px", maxWidth: "130px" }}>
-                {s.label}
-              </p>
-              <p style={{ fontSize: "41px", fontWeight: 700, color: "var(--color-text-primary)", margin: 0, lineHeight: "1" }}>
+              <p style={{ fontSize: "38px", fontWeight: 700, color: "var(--color-text-primary)", margin: 0, lineHeight: 1 }}>
                 {s.value}
               </p>
             </div>
           ))}
         </div>
 
-        {/* Attention + AI */}
-        <div style={{ display: "flex", gap: "22px", marginBottom: "40px" }}>
+        {/* Main content */}
+        <div style={{ display: "flex", gap: "20px" }}>
+          {/* Needs attention */}
           <div style={{
             flex: 1, backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)",
-            borderRadius: "13px", overflow: "hidden",
+            borderRadius: "14px", overflow: "hidden",
           }}>
             <div style={{
-              backgroundColor: "var(--color-bg-alt)", borderBottom: "1px solid var(--color-border-card)",
-              padding: "16px 24px", display: "flex", alignItems: "center", justifyContent: "space-between",
+              padding: "16px 24px",
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+              borderBottom: "1px solid var(--color-border-card)",
             }}>
-              <p style={{ fontSize: "22.5px", fontWeight: 500, margin: 0, color: "var(--color-text-primary)" }}>
-                Студенты
+              <p style={{ fontSize: "18px", fontWeight: 700, margin: 0, color: "var(--color-text-primary)" }}>
+                Требуют внимания
               </p>
-              <Link href="/dashboard/students" style={{ fontSize: "16px", color: "var(--color-accent)", textDecoration: "none", fontWeight: 500 }}>
+              <Link href="/dashboard/students" style={{ fontSize: "14px", color: "var(--color-accent)", textDecoration: "none", fontWeight: 600 }}>
                 Смотреть всех
               </Link>
             </div>
 
-            {filtered.length === 0 ? (
-              <div style={{ padding: "32px 24px", textAlign: "center", color: "var(--color-text-subtle)", fontSize: "16px" }}>
+            {filteredAttention.length === 0 ? (
+              <div style={{ padding: "32px 24px", textAlign: "center", color: "var(--color-text-subtle)", fontSize: "15px" }}>
                 {students.length === 0
-                  ? "Студенты ещё не зарегистрированы."
-                  : "Студенты не найдены."}
+                  ? "Студентов ещё нет в системе."
+                  : "Все студенты справляются!"}
               </div>
-            ) : filtered.map((s, i) => {
-              const badge = studentBadge(s);
-              const initials = displayName(s).slice(0, 2).toUpperCase();
+            ) : filteredAttention.map((s, i) => {
+              const palette = AVATAR_PALETTE[i % AVATAR_PALETTE.length];
+              const initials = getInitials(displayName(s));
+              const progress = s.progress ?? 0;
+              const isStuck = progress < 30;
+
               return (
                 <div key={s.id} style={{
-                  padding: "18px 24px",
-                  borderBottom: i < filtered.length - 1 ? "1px solid var(--color-border-card)" : "none",
-                  display: "flex", alignItems: "center", gap: "16px",
+                  padding: "16px 24px",
+                  borderBottom: i < filteredAttention.length - 1 ? "1px solid var(--color-border-card)" : "none",
+                  display: "flex", alignItems: "center", gap: "14px",
                 }}>
                   <div style={{
-                    width: "56px", height: "56px", borderRadius: "50%",
-                    backgroundColor: "#f5e0c8", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+                    width: "44px", height: "44px", borderRadius: "50%",
+                    backgroundColor: palette.bg,
+                    display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
                   }}>
-                    <span style={{ fontSize: "22px", fontWeight: 700, color: "#4a1f00" }}>{initials}</span>
+                    <span style={{ fontSize: "15px", fontWeight: 700, color: palette.color }}>{initials}</span>
                   </div>
                   <div style={{ flex: 1 }}>
-                    <p style={{ fontSize: "18px", fontWeight: 500, margin: "0 0 4px", color: "var(--color-text-primary)" }}>
+                    <p style={{ fontSize: "15px", fontWeight: 600, margin: "0 0 4px", color: "var(--color-text-primary)" }}>
                       {displayName(s)}
                     </p>
-                    <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                       <span style={{
-                        display: "inline-flex", alignItems: "center", gap: "5px",
-                        backgroundColor: badge.bg, border: `1px solid ${badge.border}`,
-                        borderRadius: "12.5px", padding: "3px 10px", fontSize: "13px", color: badge.color,
+                        fontSize: "12px", fontWeight: 600, padding: "2px 10px", borderRadius: "12px",
+                        backgroundColor: isStuck ? "#fee2e2" : "#fff3e0",
+                        color: isStuck ? "#b91c1c" : "#c2410c",
                       }}>
-                        {badge.label}
+                        {isStuck ? "В стопоре" : "Нужна помощь"}
                       </span>
-                      <span style={{ fontSize: "13px", color: "var(--color-text-subtle)", alignSelf: "center" }}>
-                        {s.email}
+                      <span style={{ fontSize: "12px", color: "var(--color-text-subtle)" }}>
+                        🕐 Прогресс: {progress}%
                       </span>
                     </div>
                   </div>
                   <Link
-                    href={`/dashboard/students/${s.id}`}
+                    href={`/dashboard/chat?partner=${s.id}`}
                     style={{
+                      height: "34px", padding: "0 16px", borderRadius: "8px",
                       backgroundColor: "var(--color-btn-primary-bg)", color: "var(--color-btn-primary-color)",
-                      textDecoration: "none", borderRadius: "10px", height: "35px", padding: "0 18px",
-                      fontSize: "16px", fontWeight: 500, flexShrink: 0, display: "inline-flex", alignItems: "center",
+                      textDecoration: "none", fontSize: "13px", fontWeight: 600, flexShrink: 0,
+                      display: "inline-flex", alignItems: "center",
                     }}
                   >
-                    Подробнее
+                    Написать
                   </Link>
                 </div>
               );
@@ -410,22 +531,30 @@ function TeacherHome() {
 
           {/* AI Insights */}
           <div style={{
-            width: "336px", flexShrink: 0,
-            backgroundColor: "var(--color-card-alt)", border: "1px solid var(--color-border-card)",
-            borderRadius: "13px", padding: "24px 22px",
+            width: "310px", flexShrink: 0,
+            backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)",
+            borderRadius: "14px", padding: "22px",
           }}>
-            <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "16px" }}>
-              <Image src="/assets/icons/ai-icon.png" alt="" width={27} height={27} className="object-contain" />
-              <p style={{ fontSize: "23px", fontWeight: 500, color: "var(--color-text-primary)", margin: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "14px" }}>
+              <span style={{ fontSize: "20px", color: "var(--color-accent)" }}>✦</span>
+              <p style={{ fontSize: "18px", fontWeight: 700, color: "var(--color-accent)", margin: 0 }}>
                 AI-Инсайты
               </p>
             </div>
-            <p style={{ fontSize: "18px", lineHeight: "33px", margin: 0, color: "var(--color-text-primary)" }}>
-              {stuckCount > 0
-                ? <>Система заметила, что <span style={{ fontWeight: 500, color: "var(--color-accent)" }}>{stuckCount} студентов</span> испытывают сложности. Рекомендуется провести дополнительный разбор.</>
-                : total > 0
-                  ? "Все студенты в порядке! Серьёзных проблем не обнаружено."
-                  : "Студенты ещё не добавлены в систему."}
+            <p style={{ fontSize: "15px", lineHeight: "1.65", margin: 0, color: "var(--color-text-primary)" }}>
+              {problemCount > 0 ? (
+                <>
+                  Система заметила, что{" "}
+                  <span style={{ fontWeight: 700, color: "var(--color-accent)" }}>
+                    {Math.round((problemCount / total) * 100)}% группы
+                  </span>{" "}
+                  испытывают сложности. Рекомендуется провести дополнительный разбор этой темы.
+                </>
+              ) : total > 0 ? (
+                "Все студенты в порядке! Серьёзных проблем не обнаружено."
+              ) : (
+                "Студенты ещё не добавлены в систему."
+              )}
             </p>
           </div>
         </div>

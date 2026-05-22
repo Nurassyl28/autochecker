@@ -5,7 +5,7 @@ import io
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
 
 from .. import database as db
 from ..auth import hash_password
@@ -134,17 +134,18 @@ async def create_assignment(
 
 
 @router.post("/assignments/upload", response_model=AssignmentResponse, status_code=201)
-async def create_assignment_from_pdf(
+async def create_assignment_from_file(
     background_tasks: BackgroundTasks,
-    title: str,
+    title: str = Form(...),
     file: UploadFile = File(...),
     admin: dict = Depends(require_admin),
 ):
-    """Create assignment from a PDF file. Text is extracted automatically."""
+    """Create assignment from a file (txt, md, pdf, docx). Text extracted automatically."""
     content = await file.read()
-    description_text = _extract_pdf_text(content)
+    filename = (file.filename or "").lower()
+    description_text = _extract_text(content, filename)
     if not description_text.strip():
-        raise HTTPException(400, "Could not extract text from PDF")
+        raise HTTPException(400, "Could not extract text from file. Supported: txt, md, pdf, docx")
 
     row = await db.execute_returning(
         """
@@ -158,11 +159,24 @@ async def create_assignment_from_pdf(
     return AssignmentResponse(**row)
 
 
-def _extract_pdf_text(data: bytes) -> str:
+def _extract_text(data: bytes, filename: str) -> str:
+    if filename.endswith(".pdf"):
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(data))
+            return "\n".join(page.extract_text() or "" for page in reader.pages)
+        except Exception:
+            return ""
+    if filename.endswith(".docx"):
+        try:
+            import docx as _docx
+            doc = _docx.Document(io.BytesIO(data))
+            return "\n".join(p.text for p in doc.paragraphs)
+        except Exception:
+            return ""
+    # txt, md, and anything else: decode as UTF-8
     try:
-        from pypdf import PdfReader
-        reader = PdfReader(io.BytesIO(data))
-        return "\n".join(page.extract_text() or "" for page in reader.pages)
+        return data.decode("utf-8", errors="replace")
     except Exception:
         return ""
 

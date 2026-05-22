@@ -1,17 +1,18 @@
-"""Handler for lab selection and VM IP change callbacks."""
+"""Handler for lab selection, VM IP change, and v2 assignment submissions."""
 
 import re
 
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from ..database import User, get_server_ip, get_server_ip_owner, set_server_ip, get_active_assignments, create_assignment_submission
+from ..database import User, get_server_ip, get_server_ip_owner, set_server_ip
 from ..ip_utils import validate_ip
 from ..keyboards import get_labs_keyboard, get_tasks_keyboard
+from .. import api_client
 
 router = Router()
 
@@ -24,9 +25,31 @@ class ChangeIPStates(StatesGroup):
 REPO_URL_RE = re.compile(r"^https?://(www\.)?(github\.com|gitlab\.com)/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/?$")
 
 
+@router.callback_query(F.data == "assignments:list")
+async def callback_assignments_list(callback: CallbackQuery, db_user: User, state: FSMContext) -> None:
+    """Show v2 API assignments from inline button."""
+    await callback.answer()
+    await state.clear()
+    items = await api_client.list_assignments(db_user.tg_id)
+    if not items:
+        await callback.message.answer(
+            "Нет доступных заданий.\n"
+            "Попросите преподавателя добавить задания через веб-панель."
+        )
+        return
+    buttons = []
+    for item in items[:20]:
+        title = str(item.get("title", "")).strip()
+        asgn_id = str(item.get("id", ""))
+        buttons.append([InlineKeyboardButton(text=title[:60], callback_data=f"asgn:{asgn_id}")])
+    await callback.message.answer(
+        "Выберите задание для сдачи:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
 @router.callback_query(F.data.startswith("lab:"))
 async def callback_select_lab(callback: CallbackQuery, db_user: User) -> None:
-    """Show tasks for the selected lab."""
     lab_id = callback.data.split(":", 1)[1]
     await callback.answer()
     try:
@@ -40,7 +63,6 @@ async def callback_select_lab(callback: CallbackQuery, db_user: User) -> None:
 
 @router.callback_query(F.data == "back_to_labs")
 async def callback_back_to_labs(callback: CallbackQuery, db_user: User) -> None:
-    """Return to the lab selection menu."""
     await callback.answer()
     try:
         server_ip = await get_server_ip(db_user.tg_id)
@@ -54,104 +76,98 @@ async def callback_back_to_labs(callback: CallbackQuery, db_user: User) -> None:
 
 @router.message(Command("assignments"))
 async def cmd_assignments(message: Message, db_user: User, state: FSMContext) -> None:
-    """Show tenant assignment list for direct submission flow."""
+    """Show available v2 assignments via API."""
     await state.clear()
-    items = await get_active_assignments(db_user.tenant_id)
+    items = await api_client.list_assignments(db_user.tg_id)
     if not items:
         await message.answer(
-            "Пока нет активных заданий для вашего университета.\n"
-            "Попросите администратора добавить задания."
+            "Нет доступных заданий.\n"
+            "Попросите администратора добавить задания через веб-панель."
         )
         return
-    lines = ["Выберите задание для сдачи:"]
-    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
     buttons = []
     for item in items[:20]:
-        code = str(item.get("code", "")).strip()
-        title = str(item.get("title", code)).strip()
-        lines.append(f"- {title} (<code>{code}</code>)")
-        buttons.append([InlineKeyboardButton(text=title[:60], callback_data=f"asgn:{code}")])
-    await message.answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        title = str(item.get("title", "")).strip()
+        asgn_id = str(item.get("id", ""))
+        buttons.append([InlineKeyboardButton(text=title[:60], callback_data=f"asgn:{asgn_id}")])
+    await message.answer(
+        "Выберите задание для сдачи:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
 
 
 @router.callback_query(F.data.startswith("asgn:"))
 async def callback_assignment_pick(callback: CallbackQuery, db_user: User, state: FSMContext) -> None:
-    """Start assignment submission by asking repo URL."""
-    code = callback.data.split(":", 1)[1].strip().lower()
+    assignment_id = callback.data.split(":", 1)[1].strip()
     await callback.answer()
     await state.set_state(ChangeIPStates.waiting_for_repo_url)
-    await state.update_data(assignment_code=code)
+    await state.update_data(assignment_id=assignment_id)
     await callback.message.answer(
-        f"Вы выбрали задание <code>{code}</code>.\n"
-        "Отправьте ссылку на репозиторий (GitHub/GitLab)."
+        f"Задание ID: <code>{assignment_id}</code>\n"
+        "Отправьте ссылку на ваш репозиторий (GitHub):\n"
+        "<code>https://github.com/username/repo</code>"
     )
 
 
 @router.message(ChangeIPStates.waiting_for_repo_url)
 async def process_assignment_repo_url(message: Message, db_user: User, state: FSMContext) -> None:
-    """Validate repo URL and create queued assignment submission."""
     text = (message.text or "").strip()
     if text.startswith("/"):
         await state.clear()
         server_ip = await get_server_ip(db_user.tg_id)
-        await message.answer("Отменено.\n\nВыберите лабу:", reply_markup=get_labs_keyboard(server_ip=server_ip))
+        await message.answer("Отменено.", reply_markup=get_labs_keyboard(server_ip=server_ip))
         return
     if not REPO_URL_RE.match(text):
         await message.answer(
-            "Неверная ссылка.\n"
-            "Отправьте URL в формате:\n"
-            "<code>https://github.com/user/repo</code>"
+            "Неверная ссылка. Формат:\n<code>https://github.com/user/repo</code>"
         )
         return
+
     data = await state.get_data()
-    code = str(data.get("assignment_code", "")).strip().lower()
-    if not code:
+    assignment_id_str = str(data.get("assignment_id", "")).strip()
+    if not assignment_id_str.isdigit():
         await state.clear()
-        await message.answer("Не удалось определить задание. Запустите /assignments ещё раз.")
+        await message.answer("Ошибка: не удалось определить задание. Запустите /assignments ещё раз.")
         return
 
-    submission_id = await create_assignment_submission(
-        tg_id=db_user.tg_id,
-        tenant_id=db_user.tenant_id,
-        assignment_code=code,
-        repo_url=text,
-        source="telegram",
-    )
     await state.clear()
-    await message.answer(
-        f"Сдача принята.\n"
-        f"Submission ID: <code>{submission_id}</code>\n"
-        f"Задание: <code>{code}</code>\n"
-        "Проверка будет выполнена асинхронно, результат придёт позже."
-    )
+    await message.answer("⏳ Сдача принята, проверяю репозиторий...")
+
+    try:
+        result = await api_client.submit_assignment(
+            tg_id=db_user.tg_id,
+            assignment_id=int(assignment_id_str),
+            repo_url=text,
+        )
+        sub_id = result.get("id", "?")
+        await message.answer(
+            f"✅ Submission #{sub_id} поставлена в очередь.\n"
+            "Результат придёт сюда автоматически после проверки."
+        )
+    except Exception as e:
+        err = str(e)
+        if "404" in err:
+            await message.answer("❌ Задание не найдено или не готово. Попробуйте /assignments ещё раз.")
+        elif "409" in err:
+            await message.answer("❌ Задание ещё не готово (spec генерируется). Попробуйте чуть позже.")
+        else:
+            await message.answer(f"❌ Ошибка сдачи: {err[:200]}")
 
 
 @router.callback_query(F.data == "change_ip")
 async def callback_change_ip(callback: CallbackQuery, db_user: User, state: FSMContext) -> None:
-    """Show student profile and prompt for new VM IP."""
     current_ip = await get_server_ip(db_user.tg_id)
-
-    # Build profile info
-    profile_lines = [
+    profile = "\n".join([
         "<b>Your profile:</b>",
         f"  GitHub: <code>{db_user.github_alias}</code>",
         f"  Email: <code>{db_user.email}</code>",
         f"  VM IP: <code>{current_ip}</code>" if current_ip else "  VM IP: not set",
-    ]
-    profile = "\n".join(profile_lines)
-
-    if current_ip:
-        prompt = (
-            f"{profile}\n\n"
-            "Send the new IP address (e.g., <code>10.93.25.100</code>),\n"
-            "or /start to cancel:"
-        )
-    else:
-        prompt = (
-            f"{profile}\n\n"
-            "Send your VM IP address (e.g., <code>10.93.25.100</code>),\n"
-            "or /start to cancel:"
-        )
+    ])
+    prompt = (
+        f"{profile}\n\n"
+        "Send your VM IP address (e.g., <code>10.93.25.100</code>),\n"
+        "or /start to cancel:"
+    )
     await callback.answer()
     await callback.message.edit_text(prompt)
     await state.set_state(ChangeIPStates.waiting_for_new_ip)
@@ -159,16 +175,11 @@ async def callback_change_ip(callback: CallbackQuery, db_user: User, state: FSMC
 
 @router.message(ChangeIPStates.waiting_for_new_ip)
 async def process_change_ip(message: Message, db_user: User, state: FSMContext) -> None:
-    """Validate and save the new VM IP, then return to labs menu."""
     text = message.text.strip() if message.text else ""
-
     if text.startswith("/"):
         await state.clear()
         server_ip = await get_server_ip(db_user.tg_id)
-        await message.answer(
-            "Cancelled.\n\nChoose a lab:",
-            reply_markup=get_labs_keyboard(server_ip=server_ip),
-        )
+        await message.answer("Cancelled.", reply_markup=get_labs_keyboard(server_ip=server_ip))
         return
 
     valid, error_msg = validate_ip(text)
@@ -178,15 +189,11 @@ async def process_change_ip(message: Message, db_user: User, state: FSMContext) 
 
     existing_owner = await get_server_ip_owner(text, db_user.tg_id)
     if existing_owner:
-        await message.answer(
-            "This IP is already registered to another student.\n"
-            "Each student must use their own VM. Please enter your unique VM IP:"
-        )
+        await message.answer("This IP is already registered to another student.")
         return
 
     await set_server_ip(db_user.tg_id, text)
     await state.clear()
-
     await message.answer(
         f"VM IP updated to <code>{text}</code>\n\nChoose a lab:",
         reply_markup=get_labs_keyboard(server_ip=text),

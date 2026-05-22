@@ -1,22 +1,28 @@
 "use client";
 
-import Image from "next/image";
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { getStudents } from "@/lib/api";
+import { getStudents, getStudentDetails } from "@/lib/api";
 
-// v2 API returns: {id, university_id, email, role, full_name, tg_id, created_at}
 interface StudentRow {
   id: number;
   email: string;
   full_name: string | null;
   tg_id: number | null;
   created_at: string;
-  // Computed from submissions (not in list API — defaults shown)
   progress?: number;
   avg_score?: number;
   passed_tasks?: number;
   total_tasks?: number;
+}
+
+interface SubMark {
+  id: number;
+  assignment_title?: string;
+  assignment_id: number;
+  score: number | null;
+  pass_fail: "pass" | "fail" | null;
+  status: string;
 }
 
 type StudentStatus = "active" | "stuck" | "needs_help";
@@ -28,18 +34,48 @@ function getStatus(s: StudentRow): StudentStatus {
   return "stuck";
 }
 
-const STATUS_LABELS: Record<StudentStatus, { label: string; bg: string; border: string; color: string }> = {
-  active:     { label: "Активен",       bg: "#ecfdf5", border: "#b5f5d7", color: "#0e3e12" },
-  stuck:      { label: "В стопоре",     bg: "#fef2f2", border: "#fec7c7", color: "#8f0000" },
-  needs_help: { label: "Нужна помощь",  bg: "#fffbeb", border: "#fde372", color: "#af3f00" },
+const STATUS_INFO: Record<StudentStatus, { label: string; bg: string; color: string }> = {
+  active:     { label: "Активен",      bg: "#dcfce7", color: "#15803d" },
+  stuck:      { label: "В стопоре",    bg: "#fee2e2", color: "#b91c1c" },
+  needs_help: { label: "Нужна помощь", bg: "#ffedd5", color: "#c2410c" },
 };
+
+function displayName(s: StudentRow) {
+  return s.full_name || s.email.split("@")[0];
+}
+
+function getInitials(name: string) {
+  const parts = name.trim().split(/\s+/);
+  return parts.length >= 2
+    ? (parts[0][0] + parts[1][0]).toUpperCase()
+    : name.slice(0, 2).toUpperCase();
+}
 
 export default function StudentsPage() {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<"all" | StudentStatus>("all");
   const [students, setStudents] = useState<StudentRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [marksCache, setMarksCache] = useState<Record<number, SubMark[]>>({});
+  const [marksLoading, setMarksLoading] = useState<Record<number, boolean>>({});
   const router = useRouter();
+
+  async function toggleExpand(studentId: number) {
+    if (expandedId === studentId) { setExpandedId(null); return; }
+    setExpandedId(studentId);
+    if (marksCache[studentId]) return;
+    setMarksLoading((prev) => ({ ...prev, [studentId]: true }));
+    try {
+      const res = await getStudentDetails(studentId);
+      if (res.ok) {
+        const data = await res.json();
+        setMarksCache((prev) => ({ ...prev, [studentId]: data.submissions ?? [] }));
+      }
+    } finally {
+      setMarksLoading((prev) => ({ ...prev, [studentId]: false }));
+    }
+  }
 
   const loadStudents = useCallback(() => {
     setLoading(true);
@@ -51,15 +87,10 @@ export default function StudentsPage() {
 
   useEffect(() => { loadStudents(); }, [loadStudents]);
 
-  const displayName = (s: StudentRow) => s.full_name || s.email.split("@")[0];
-
   const filtered = students.filter((s) => {
     const name = displayName(s).toLowerCase();
-    const matchSearch =
-      name.includes(search.toLowerCase()) ||
-      s.email.toLowerCase().includes(search.toLowerCase());
-    const status = getStatus(s);
-    const matchFilter = filter === "all" || status === filter;
+    const matchSearch = name.includes(search.toLowerCase()) || s.email.toLowerCase().includes(search.toLowerCase());
+    const matchFilter = filter === "all" || getStatus(s) === filter;
     return matchSearch && matchFilter;
   });
 
@@ -68,215 +99,255 @@ export default function StudentsPage() {
   const stuckCount  = students.filter((s) => getStatus(s) === "stuck").length;
 
   return (
-    <div style={{ padding: "43px 45px", backgroundColor: "var(--color-bg-alt)", minHeight: "100%" }}>
-
-      {/* Top bar */}
-      <div style={{
-        position: "absolute", top: 0, left: "288px", right: 0,
-        height: "70px", backgroundColor: "var(--color-topbar)",
-        borderBottom: "1px solid var(--color-border)",
-        display: "flex", alignItems: "center", padding: "0 45px", gap: "16px",
-      }}>
-        <div style={{
-          flex: 1, maxWidth: "504px", backgroundColor: "var(--color-card-input)",
-          borderRadius: "8px", height: "43px",
-          display: "flex", alignItems: "center", gap: "10px", padding: "0 14px",
-        }}>
-          <Image src="/assets/icons/search-icon.png" alt="" width={22} height={22} className="object-contain" />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Поиск студентов..."
-            style={{ border: "none", outline: "none", background: "transparent", fontSize: "16px", color: "var(--color-text-muted)", flex: 1 }}
-          />
-        </div>
-        <div style={{ marginLeft: "auto" }}>
-          <Image src="/assets/icons/doorbell-icon.png" alt="" width={26} height={26} className="object-contain" />
-        </div>
-      </div>
-
-      <div style={{ paddingTop: "90px" }}>
-        {/* Header + stats */}
+    <div style={{ backgroundColor: "var(--color-bg-alt)", minHeight: "100%" }}>
+      {/* Page header */}
+      <div style={{ padding: "36px 40px 0" }}>
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: "28px" }}>
           <div>
-            <h1 style={{ fontSize: "38.5px", fontWeight: 700, color: "var(--color-text-primary)", margin: "0 0 8px" }}>Студенты</h1>
-            <p style={{ fontSize: "18px", color: "var(--color-text-muted)", margin: 0, maxWidth: "440px", lineHeight: "1.45" }}>
+            <h1 style={{ fontSize: "36px", fontWeight: 700, color: "var(--color-text-primary)", margin: "0 0 8px" }}>
+              Студенты
+            </h1>
+            <p style={{ fontSize: "15px", color: "var(--color-text-muted)", margin: 0, maxWidth: "380px", lineHeight: "1.5" }}>
               Управление списком студентов и мониторинг их успеваемости.
             </p>
           </div>
 
+          {/* Mini stat cards */}
           <div style={{ display: "flex", gap: "12px" }}>
-            <div style={{ backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)", borderRadius: "8px", padding: "14px 20px", width: "158px" }}>
-              <p style={{ fontSize: "14px", color: "var(--color-text-primary)", textTransform: "uppercase", margin: "0 0 12px", lineHeight: "1.2" }}>Всего студентов</p>
-              <p style={{ fontSize: "27px", fontWeight: 700, color: "var(--color-text-primary)", margin: 0 }}>{totalCount}</p>
+            <div style={{
+              backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)",
+              borderRadius: "10px", padding: "12px 20px", minWidth: "130px",
+            }}>
+              <p style={{ fontSize: "11px", fontWeight: 600, color: "var(--color-text-muted)", textTransform: "uppercase", margin: "0 0 8px", letterSpacing: "0.5px" }}>
+                Всего студентов
+              </p>
+              <p style={{ fontSize: "28px", fontWeight: 700, color: "var(--color-text-primary)", margin: 0 }}>{totalCount}</p>
             </div>
-            <div style={{ backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)", borderRadius: "8px", padding: "14px 20px", width: "158px" }}>
-              <p style={{ fontSize: "14px", color: "var(--color-text-primary)", textTransform: "uppercase", margin: "0 0 12px" }}>Активные</p>
-              <p style={{ fontSize: "27px", fontWeight: 700, color: "var(--color-text-primary)", margin: 0 }}>{activeCount}</p>
+            <div style={{
+              backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)",
+              borderRadius: "10px", padding: "12px 20px", minWidth: "130px",
+            }}>
+              <p style={{ fontSize: "11px", fontWeight: 600, color: "var(--color-text-muted)", textTransform: "uppercase", margin: "0 0 8px", letterSpacing: "0.5px" }}>
+                Активные
+              </p>
+              <p style={{ fontSize: "28px", fontWeight: 700, color: "var(--color-text-primary)", margin: 0 }}>{activeCount}</p>
             </div>
-            <div style={{ backgroundColor: "#fcf2f7", border: "1px solid #ecc0c3", borderRadius: "8px", padding: "14px 20px", width: "158px" }}>
-              <p style={{ fontSize: "14px", color: "#bb2526", textTransform: "uppercase", margin: "0 0 12px" }}>В стопоре</p>
-              <p style={{ fontSize: "27px", fontWeight: 700, color: "#bb2526", margin: 0 }}>{stuckCount}</p>
+            <div style={{
+              backgroundColor: "#fff1f2", border: "1px solid #fecdd3",
+              borderRadius: "10px", padding: "12px 20px", minWidth: "130px",
+            }}>
+              <p style={{ fontSize: "11px", fontWeight: 600, color: "#b91c1c", textTransform: "uppercase", margin: "0 0 8px", letterSpacing: "0.5px" }}>
+                В стопоре
+              </p>
+              <p style={{ fontSize: "28px", fontWeight: 700, color: "#b91c1c", margin: 0 }}>{stuckCount}</p>
             </div>
           </div>
         </div>
 
         {/* Toolbar */}
-        <div style={{
-          backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)",
-          borderRadius: "9px", padding: "20px 22px",
-          display: "flex", gap: "14px", alignItems: "center",
-          marginBottom: "14px",
-        }}>
+        <div style={{ display: "flex", gap: "12px", alignItems: "center", marginBottom: "16px" }}>
           <div style={{
-            flex: 1, backgroundColor: "var(--color-bg-alt)",
-            border: "1px solid var(--color-border-input)", borderRadius: "8px",
-            height: "44px", display: "flex", alignItems: "center", gap: "10px", padding: "0 14px",
+            flex: 1, backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)",
+            borderRadius: "10px", height: "44px",
+            display: "flex", alignItems: "center", gap: "10px", padding: "0 14px",
           }}>
-            <Image src="/assets/icons/search-icon.png" alt="" width={21} height={21} className="object-contain" />
+            <span style={{ fontSize: "16px", color: "var(--color-text-muted)" }}>🔍</span>
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Поиск по имени или email..."
-              style={{ border: "none", outline: "none", background: "transparent", fontSize: "16px", color: "var(--color-text-primary)", flex: 1 }}
+              placeholder="Поиск по имени..."
+              style={{ border: "none", outline: "none", background: "transparent", fontSize: "14px", color: "var(--color-text-primary)", flex: 1 }}
             />
           </div>
 
           <div style={{
-            backgroundColor: "var(--color-bg-alt)", border: "1px solid var(--color-border-input)",
-            borderRadius: "8px", height: "44px",
-            display: "flex", alignItems: "center", padding: "0 14px", gap: "8px", minWidth: "185px",
+            backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)",
+            borderRadius: "10px", height: "44px",
+            display: "flex", alignItems: "center", padding: "0 14px", gap: "8px", minWidth: "170px",
           }}>
             <select
               value={filter}
               onChange={(e) => setFilter(e.target.value as "all" | StudentStatus)}
-              style={{ border: "none", outline: "none", background: "transparent", fontSize: "16px", color: "var(--color-text-primary)", flex: 1, cursor: "pointer", WebkitAppearance: "none", appearance: "none" }}
+              style={{ border: "none", outline: "none", background: "transparent", fontSize: "14px", color: "var(--color-text-primary)", flex: 1, cursor: "pointer" }}
             >
               <option value="all">Все статусы</option>
               <option value="active">Активен</option>
               <option value="needs_help">Нужна помощь</option>
               <option value="stuck">В стопоре</option>
             </select>
-            <Image src="/assets/icons/expand-arrow.png" alt="" width={18} height={18} className="object-contain" style={{ pointerEvents: "none", flexShrink: 0 }} />
+            <span style={{ fontSize: "12px", color: "var(--color-text-muted)" }}>▼</span>
           </div>
         </div>
+      </div>
 
-        {/* Student rows */}
+      {/* Student list */}
+      <div style={{ padding: "0 40px 40px" }}>
         {loading ? (
-          <div style={{ padding: "48px", textAlign: "center", color: "var(--color-text-subtle)", fontSize: "16px" }}>
+          <div style={{ padding: "60px", textAlign: "center", color: "var(--color-text-subtle)", fontSize: "16px" }}>
             Загрузка студентов...
           </div>
+        ) : filtered.length === 0 ? (
+          <div style={{
+            backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)",
+            borderRadius: "12px", padding: "48px",
+            textAlign: "center", color: "var(--color-text-subtle)", fontSize: "15px",
+          }}>
+            {students.length === 0
+              ? "Студентов пока нет. Администратор должен добавить их в систему."
+              : "Студенты не найдены."}
+          </div>
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-            {filtered.length === 0 && (
-              <div style={{
-                backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)",
-                borderRadius: "9px", padding: "48px",
-                textAlign: "center", color: "var(--color-text-subtle)", fontSize: "16px",
-              }}>
-                {students.length === 0
-                  ? "Студентов пока нет. Администратор должен добавить их в систему."
-                  : "Студенты не найдены."}
-              </div>
-            )}
-
-            {filtered.map((s) => {
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+            {filtered.map((s, i) => {
               const status = getStatus(s);
-              const statusInfo = STATUS_LABELS[status];
+              const statusInfo = STATUS_INFO[status];
               const progress = s.progress ?? 0;
               const progressColor =
-                status === "active" ? "var(--color-progress-active)" :
-                status === "stuck"  ? "#ba1a1a" : "#f59e0b";
-              const initials = displayName(s).slice(0, 2).toUpperCase();
+                status === "active" ? "#142175" :
+                status === "stuck"  ? "#b91c1c" : "#f59e0b";
+              const name = displayName(s);
+              const initials = getInitials(name);
+              const isExpanded = expandedId === s.id;
+              const marks: SubMark[] = marksCache[s.id] ?? [];
+              const isLoadingMarks = marksLoading[s.id];
+              const avgGrade = s.avg_score != null ? (s.avg_score / 20).toFixed(1) : "—";
+              const totalPoints = s.passed_tasks != null && s.avg_score != null
+                ? Math.round(s.passed_tasks * s.avg_score * 10)
+                : 0;
 
               return (
                 <div
                   key={s.id}
                   style={{
                     backgroundColor: "var(--color-card)",
-                    border: `1px solid ${status === "stuck" ? "#efcbca" : "var(--color-border-card)"}`,
-                    borderRadius: "9px",
+                    border: "1px solid var(--color-border-card)",
+                    borderRadius: "12px", overflow: "hidden",
                   }}
                 >
-                  <div style={{ padding: "0 22px", height: "96px", display: "flex", alignItems: "center", gap: "20px" }}>
+                  {/* Main row */}
+                  <div style={{
+                    display: "grid",
+                    gridTemplateColumns: "1fr 180px 200px 160px 44px",
+                    alignItems: "center",
+                    padding: "16px 20px",
+                    gap: "16px",
+                  }}>
                     {/* Avatar + Name */}
                     <div
                       onClick={() => router.push(`/dashboard/students/${s.id}`)}
-                      style={{ display: "flex", alignItems: "center", gap: "14px", cursor: "pointer", flexShrink: 0 }}
+                      style={{ display: "flex", alignItems: "center", gap: "14px", cursor: "pointer" }}
                     >
                       <div style={{
-                        width: "55px", height: "55px", borderRadius: "50%",
-                        backgroundColor: "#e8e4f0",
-                        display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+                        width: "48px", height: "48px", borderRadius: "50%",
+                        backgroundColor: "#f0f0f5", flexShrink: 0,
+                        display: "flex", alignItems: "center", justifyContent: "center",
                       }}>
-                        <span style={{ fontSize: "20px", fontWeight: 700, color: "var(--color-accent)" }}>{initials}</span>
+                        <span style={{ fontSize: "17px", fontWeight: 700, color: "#6b6b8a" }}>{initials}</span>
                       </div>
-                      <div style={{ width: "170px" }}>
-                        <p style={{
-                          fontSize: "17px", fontWeight: 600, color: "var(--color-text-primary)", margin: "0 0 4px",
-                          textDecoration: "underline", textDecorationColor: "transparent", transition: "text-decoration-color 0.15s",
-                        }}
-                          onMouseEnter={(e) => (e.currentTarget.style.textDecorationColor = "var(--color-accent)")}
-                          onMouseLeave={(e) => (e.currentTarget.style.textDecorationColor = "transparent")}
-                        >
-                          {displayName(s)}
+                      <div>
+                        <p style={{ fontSize: "16px", fontWeight: 600, color: "var(--color-text-primary)", margin: "0 0 3px" }}>
+                          {name}
                         </p>
-                        <span style={{ fontSize: "13px", color: "var(--color-text-subtle)" }}>
-                          {s.email}
-                        </span>
+                        <p style={{ fontSize: "12px", color: "var(--color-text-subtle)", margin: 0 }}>
+                          🎓 {s.email}
+                        </p>
                       </div>
                     </div>
 
-                    <div style={{ width: "1px", height: "53px", backgroundColor: "var(--color-border-card)", flexShrink: 0 }} />
-
-                    {/* Progress */}
-                    <div style={{ width: "200px", flexShrink: 0 }}>
+                    {/* Progress bar */}
+                    <div>
                       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "6px" }}>
-                        <span style={{ fontSize: "13px", color: "var(--color-text-light)" }}>Прогресс</span>
-                        <span style={{ fontSize: "13px", fontWeight: 600, color: status === "active" ? "var(--color-accent)" : "var(--color-text-muted)" }}>
-                          {progress}%
-                        </span>
+                        <span style={{ fontSize: "12px", color: "var(--color-text-muted)" }}>Прогресс</span>
+                        <span style={{ fontSize: "12px", fontWeight: 700, color: progressColor }}>{progress}%</span>
                       </div>
-                      <div style={{ width: "100%", height: "7px", backgroundColor: "var(--color-border)", borderRadius: "3.5px", overflow: "hidden" }}>
-                        <div style={{ height: "100%", width: `${progress}%`, backgroundColor: progressColor, borderRadius: "3.5px" }} />
+                      <div style={{ height: "6px", backgroundColor: "var(--color-border)", borderRadius: "3px", overflow: "hidden" }}>
+                        <div style={{ height: "100%", width: `${progress}%`, backgroundColor: progressColor, borderRadius: "3px" }} />
                       </div>
                     </div>
-
-                    <div style={{ width: "1px", height: "53px", backgroundColor: "var(--color-border-card)", flexShrink: 0 }} />
 
                     {/* Scores */}
-                    <div style={{ flex: 1 }}>
-                      <p style={{ fontSize: "13px", color: "var(--color-text-light)", margin: "0 0 4px" }}>Выполнено / Средний балл</p>
+                    <div>
+                      <p style={{ fontSize: "11px", color: "var(--color-text-muted)", margin: "0 0 4px", textTransform: "uppercase", letterSpacing: "0.3px" }}>
+                        Средние / Общие баллы
+                      </p>
                       <p style={{ fontSize: "20px", fontWeight: 700, color: "var(--color-text-primary)", margin: 0 }}>
-                        {s.passed_tasks ?? 0}/{s.total_tasks ?? 0}&nbsp;&nbsp;·&nbsp;&nbsp;{s.avg_score ?? 0}%
+                        {avgGrade}{" "}
+                        <span style={{ fontSize: "14px", color: "var(--color-text-muted)", fontWeight: 400 }}>
+                          / {totalPoints}
+                        </span>
                       </p>
                     </div>
 
-                    <div style={{ width: "1px", height: "53px", backgroundColor: "var(--color-border-card)", flexShrink: 0 }} />
-
                     {/* Status badge */}
-                    <div style={{ width: "148px", display: "flex", justifyContent: "center" }}>
+                    <div style={{ display: "flex", justifyContent: "center" }}>
                       <span style={{
-                        backgroundColor: statusInfo.bg, border: `1px solid ${statusInfo.border}`,
-                        borderRadius: "14px", padding: "5px 14px",
-                        fontSize: "13px", fontWeight: 600, color: statusInfo.color, whiteSpace: "nowrap",
+                        fontSize: "12px", fontWeight: 600, padding: "5px 14px", borderRadius: "20px",
+                        backgroundColor: statusInfo.bg, color: statusInfo.color, whiteSpace: "nowrap",
                       }}>
                         {statusInfo.label}
                       </span>
                     </div>
 
-                    {/* Detail link */}
+                    {/* Expand button */}
                     <button
-                      onClick={() => router.push(`/dashboard/students/${s.id}`)}
+                      onClick={() => toggleExpand(s.id)}
                       style={{
-                        backgroundColor: "var(--color-btn-primary-bg)", color: "var(--color-btn-primary-color)",
-                        border: "none", borderRadius: "8px", height: "36px", padding: "0 18px",
-                        fontSize: "14px", fontWeight: 500, cursor: "pointer", flexShrink: 0,
+                        width: "36px", height: "36px", borderRadius: "8px",
+                        backgroundColor: isExpanded ? "var(--color-accent)" : "var(--color-bg-alt)",
+                        border: `1px solid ${isExpanded ? "var(--color-accent)" : "var(--color-border-input)"}`,
+                        color: isExpanded ? "white" : "var(--color-text-muted)",
+                        fontSize: "18px", fontWeight: 700, cursor: "pointer",
+                        display: "flex", alignItems: "center", justifyContent: "center",
                       }}
                     >
-                      Подробнее
+                      {isExpanded ? "−" : "+"}
                     </button>
                   </div>
+
+                  {/* Expanded marks */}
+                  {isExpanded && (
+                    <div style={{
+                      borderTop: "1px solid var(--color-border-card)",
+                      backgroundColor: "var(--color-bg-alt)",
+                      padding: "14px 20px",
+                    }}>
+                      {isLoadingMarks ? (
+                        <span style={{ fontSize: "13px", color: "var(--color-text-subtle)" }}>Загрузка оценок...</span>
+                      ) : marks.length === 0 ? (
+                        <span style={{ fontSize: "13px", color: "var(--color-text-subtle)" }}>Работы ещё не сданы.</span>
+                      ) : (
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                          {marks.map((m) => {
+                            const scoreNum = m.score != null ? Math.round(m.score * 100) : null;
+                            const isPassed = m.pass_fail === "pass";
+                            const isPending = m.status !== "done";
+                            const bg = isPending ? "#eef2ff" : isPassed ? "#dcfce7" : "#fee2e2";
+                            const color = isPending ? "#3730a3" : isPassed ? "#15803d" : "#b91c1c";
+                            const border = isPending ? "#c7d2fe" : isPassed ? "#bbf7d0" : "#fecaca";
+                            const label = m.assignment_title || `Задание #${m.assignment_id}`;
+                            return (
+                              <div key={m.id} style={{
+                                display: "flex", alignItems: "center", gap: "8px",
+                                backgroundColor: bg, border: `1px solid ${border}`,
+                                borderRadius: "8px", padding: "6px 12px",
+                              }}>
+                                <span style={{ fontSize: "13px", color: "var(--color-text-primary)", fontWeight: 500 }}>
+                                  {label}
+                                </span>
+                                <span style={{
+                                  fontSize: "12px", fontWeight: 700, color,
+                                  backgroundColor: "white", borderRadius: "5px",
+                                  padding: "2px 7px",
+                                }}>
+                                  {isPending ? "…" : scoreNum != null ? `${scoreNum}%` : "—"}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               );
             })}

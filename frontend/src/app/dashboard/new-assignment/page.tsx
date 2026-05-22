@@ -1,267 +1,290 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
-import Image from "next/image";
-import { saveAssignment } from "@/lib/store";
+import { useState, useEffect, useRef } from "react";
+import { getToken } from "@/lib/api";
+
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+interface Assignment {
+  id: number;
+  title: string;
+  description_text: string;
+  spec_status: "pending" | "generating" | "ready" | "failed";
+  llm_spec: { checks?: { id: string; description: string; weight: number }[] } | null;
+  created_at: string;
+}
+
+const SPEC_STATUS: Record<string, { label: string; bg: string; color: string }> = {
+  pending:    { label: "⏳ Ожидание",  bg: "#fef9c3", color: "#a16207" },
+  generating: { label: "🔄 Генерация", bg: "#eff6ff", color: "#1d4ed8" },
+  ready:      { label: "✅ Готово",    bg: "#dcfce7", color: "#15803d" },
+  failed:     { label: "❌ Ошибка",    bg: "#fee2e2", color: "#b91c1c" },
+};
 
 export default function NewAssignmentPage() {
-  const router = useRouter();
-  const [title, setTitle] = useState("");
-  const [deadline, setDeadline] = useState("");
-  const [comment, setComment] = useState("");
-  const [bold, setBold] = useState(false);
-  const [italic, setItalic] = useState(false);
-  const [dragOver, setDragOver] = useState(false);
-  const [fileName, setFileName] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  function handlePublish() {
-    if (!title.trim()) return;
-    saveAssignment({
-      id: Date.now().toString(),
-      title: title.trim(),
-      deadline,
-      comment,
-      createdAt: new Date().toLocaleDateString("ru-RU"),
-    });
-    router.push("/dashboard");
+  const [assignments, setAssignments] = useState<Assignment[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [expandedSpec, setExpandedSpec] = useState<number | null>(null);
+
+  const [mode, setMode] = useState<"text" | "file">("text");
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [file, setFile] = useState<File | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [showForm, setShowForm] = useState(false);
+
+  function authHeader(): HeadersInit {
+    const t = getToken();
+    return t ? { Authorization: `Bearer ${t}` } : {};
   }
 
+  async function loadAssignments() {
+    setLoading(true);
+    const res = await fetch(`${BASE_URL}/teacher/assignments`, { headers: authHeader() });
+    if (res.ok) setAssignments(await res.json());
+    setLoading(false);
+  }
+
+  useEffect(() => { loadAssignments(); }, []);
+
+  async function handleCreate(e: React.FormEvent) {
+    e.preventDefault();
+    setError("");
+    if (!title.trim()) { setError("Введите название задания"); return; }
+    setSaving(true);
+    try {
+      let res: Response;
+      if (mode === "file" && file) {
+        const fd = new FormData();
+        fd.append("title", title.trim());
+        fd.append("file", file);
+        res = await fetch(`${BASE_URL}/teacher/assignments/upload`, {
+          method: "POST",
+          headers: authHeader(),
+          body: fd,
+        });
+      } else {
+        if (!description.trim()) { setError("Введите описание задания"); setSaving(false); return; }
+        res = await fetch(`${BASE_URL}/teacher/assignments`, {
+          method: "POST",
+          headers: { ...(authHeader() as Record<string, string>), "Content-Type": "application/json" },
+          body: JSON.stringify({ title: title.trim(), description_text: description.trim() }),
+        });
+      }
+      if (res.ok) {
+        setTitle(""); setDescription(""); setFile(null); setShowForm(false);
+        await loadAssignments();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        const detail = (err as { detail?: unknown }).detail;
+        setError(
+          typeof detail === "string" ? detail
+          : Array.isArray(detail) ? detail.map((d: { msg?: string }) => d.msg ?? "").join("; ")
+          : "Ошибка создания задания"
+        );
+      }
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDelete(id: number, taskTitle: string) {
+    if (!confirm(`Удалить задание "${taskTitle}"?`)) return;
+    await fetch(`${BASE_URL}/teacher/assignments/${id}`, { method: "DELETE", headers: authHeader() });
+    await loadAssignments();
+  }
+
+  const inputStyle: React.CSSProperties = {
+    height: "44px", padding: "0 14px", borderRadius: "10px",
+    border: "1.5px solid var(--color-border-input)", fontSize: "15px",
+    color: "var(--color-text-primary)", backgroundColor: "var(--color-card)",
+    outline: "none", width: "100%", boxSizing: "border-box",
+  };
+
   return (
-    <div style={{ padding: "0", backgroundColor: "var(--color-bg-alt)", minHeight: "100%" }}>
-      {/* Top bar */}
-      <div style={{
-        height: "70px", backgroundColor: "var(--color-topbar)",
-        borderBottom: "1px solid var(--color-border)",
-        display: "flex", alignItems: "center", padding: "0 45px",
-        justifyContent: "space-between",
-      }}>
-        <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
+    <div style={{ padding: "43px 45px", backgroundColor: "var(--color-bg-alt)", minHeight: "100%" }}>
+      <div style={{ maxWidth: "900px" }}>
+
+        {/* Header */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "28px" }}>
+          <div>
+            <h1 style={{ fontSize: "34px", fontWeight: 700, color: "var(--color-text-primary)", margin: "0 0 6px" }}>Задания</h1>
+            <p style={{ fontSize: "16px", color: "var(--color-text-muted)", margin: 0 }}>
+              Создавайте задания — LLM автоматически сгенерирует критерии проверки.
+            </p>
+          </div>
           <button
-            onClick={() => router.back()}
+            onClick={() => { setShowForm(!showForm); setError(""); }}
             style={{
-              background: "none", border: "none", cursor: "pointer",
-              fontSize: "22px", color: "var(--color-text-muted)", padding: 0,
-              display: "flex", alignItems: "center",
+              height: "42px", padding: "0 20px", borderRadius: "10px",
+              backgroundColor: "var(--color-btn-primary-bg)", color: "var(--color-btn-primary-color)",
+              border: "none", fontSize: "15px", fontWeight: 600, cursor: "pointer",
             }}
           >
-            ←
+            {showForm ? "✕ Отмена" : "+ Новое задание"}
           </button>
-          <span style={{ fontSize: "27px", fontWeight: 600, color: "var(--color-text-primary)" }}>Новое задание</span>
-        </div>
-        <button
-          onClick={handlePublish}
-          disabled={!title.trim()}
-          style={{
-            backgroundColor: "var(--color-btn-primary-bg)", color: "var(--color-btn-primary-color)",
-            border: "none", borderRadius: "11px",
-            height: "38px", padding: "0 24px",
-            fontSize: "17px", fontWeight: 500, cursor: title.trim() ? "pointer" : "not-allowed",
-            opacity: title.trim() ? 1 : 0.5,
-          }}
-        >
-          Опубликовать задание
-        </button>
-      </div>
-
-      <div style={{ padding: "32px 45px", display: "flex", gap: "24px", alignItems: "flex-start" }}>
-        {/* Left column */}
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "20px" }}>
-          {/* Основная информация */}
-          <div style={{
-            backgroundColor: "var(--color-bg-alt)", border: "2px solid var(--color-border-card)",
-            borderRadius: "13px", padding: "24px 28px",
-          }}>
-            <h2 style={{ fontSize: "22px", fontWeight: 600, color: "var(--color-text-primary)", margin: "0 0 20px" }}>
-              Основная информация
-            </h2>
-
-            {/* Title + Deadline */}
-            <div style={{ display: "flex", gap: "20px", marginBottom: "20px" }}>
-              <div style={{ flex: 1 }}>
-                <label style={{ fontSize: "16px", color: "var(--color-text-primary)", display: "block", marginBottom: "8px" }}>
-                  Название
-                </label>
-                <input
-                  value={title}
-                  onChange={(e) => setTitle(e.target.value)}
-                  placeholder="Введите название"
-                  style={{
-                    width: "100%", height: "54px",
-                    border: "1px solid var(--color-border-input)", borderRadius: "10px",
-                    padding: "0 16px", fontSize: "19px", color: "var(--color-text-primary)",
-                    backgroundColor: "var(--color-card)", outline: "none",
-                    boxSizing: "border-box",
-                  }}
-                />
-              </div>
-              <div style={{ width: "220px", flexShrink: 0 }}>
-                <label style={{ fontSize: "16px", color: "var(--color-text-primary)", display: "block", marginBottom: "8px" }}>
-                  Дедлайн
-                </label>
-                <input
-                  type="date"
-                  value={deadline}
-                  onChange={(e) => setDeadline(e.target.value)}
-                  style={{
-                    width: "100%", height: "54px",
-                    border: "1px solid var(--color-border-input)", borderRadius: "10px",
-                    padding: "0 16px", fontSize: "16px", color: "var(--color-text-primary)",
-                    backgroundColor: "var(--color-card)", outline: "none",
-                    boxSizing: "border-box",
-                  }}
-                />
-              </div>
-            </div>
-
-            {/* ZIP upload */}
-            <div
-              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-              onDragLeave={() => setDragOver(false)}
-              onDrop={(e) => {
-                e.preventDefault();
-                setDragOver(false);
-                const f = e.dataTransfer.files[0];
-                if (f) setFileName(f.name);
-              }}
-              onClick={() => document.getElementById("zipInput")?.click()}
-              style={{
-                border: `2px dashed ${dragOver ? "var(--color-accent)" : "var(--color-border-input)"}`,
-                borderRadius: "16px", height: "217px",
-                backgroundColor: "var(--color-card)", cursor: "pointer",
-                display: "flex", flexDirection: "column",
-                alignItems: "center", justifyContent: "center", gap: "8px",
-                transition: "border-color 0.2s",
-              }}
-            >
-              <div style={{
-                width: "55px", height: "55px", borderRadius: "50%",
-                backgroundColor: "var(--color-card-input)",
-                display: "flex", alignItems: "center", justifyContent: "center",
-              }}>
-                <Image src="/assets/icons/historical-icon.png" alt="" width={32} height={32} className="object-contain" />
-              </div>
-              <p style={{ fontSize: "18px", fontWeight: 600, color: "var(--color-text-muted)", margin: 0 }}>
-                {fileName || "Перетащите ZIP файл сюда или выберите файл"}
-              </p>
-              <p style={{ fontSize: "18px", color: "var(--color-text-subtle)", margin: 0 }}>Максимальный размер файла: 50МВ</p>
-              <input id="zipInput" type="file" accept=".zip" style={{ display: "none" }}
-                onChange={(e) => { const f = e.target.files?.[0]; if (f) setFileName(f.name); }} />
-            </div>
-          </div>
-
-          {/* Комментарии */}
-          <div style={{
-            backgroundColor: "var(--color-bg-alt)", border: "2px solid var(--color-border-card)",
-            borderRadius: "13px", padding: "24px 28px",
-          }}>
-            <h2 style={{ fontSize: "22px", fontWeight: 600, color: "var(--color-text-primary)", margin: "0 0 20px" }}>
-              Комментарии
-            </h2>
-
-            <div style={{ border: "1.4px solid var(--color-border-light)", borderRadius: "7px", overflow: "hidden" }}>
-              {/* Toolbar */}
-              <div style={{
-                backgroundColor: "var(--color-card-subtle)", borderBottom: "1.4px solid var(--color-border-light)",
-                padding: "0 16px", height: "45px",
-                display: "flex", alignItems: "center", gap: "8px",
-              }}>
-                <button
-                  onMouseDown={(e) => { e.preventDefault(); setBold(!bold); }}
-                  style={{
-                    fontWeight: 700, fontSize: "16px", color: bold ? "var(--color-accent)" : "var(--color-text-light)",
-                    background: "none", border: "none", cursor: "pointer", padding: "2px 6px",
-                    borderRadius: "4px", backgroundColor: bold ? "#e0e0ff" : "transparent",
-                  }}
-                >B</button>
-                <button
-                  onMouseDown={(e) => { e.preventDefault(); setItalic(!italic); }}
-                  style={{
-                    fontStyle: "italic", fontWeight: 700, fontSize: "16px",
-                    color: italic ? "var(--color-accent)" : "var(--color-text-light)",
-                    background: "none", border: "none", cursor: "pointer", padding: "2px 6px",
-                    borderRadius: "4px", backgroundColor: italic ? "#e0e0ff" : "transparent",
-                  }}
-                >I</button>
-                <div style={{ width: "1px", height: "15px", backgroundColor: "var(--color-border)" }} />
-                <button style={{ background: "none", border: "none", cursor: "pointer", fontSize: "16px", opacity: 0.7 }}>
-                  📎
-                </button>
-              </div>
-              {/* Textarea */}
-              <textarea
-                value={comment}
-                onChange={(e) => setComment(e.target.value)}
-                placeholder="Напишите комментарии к заданию..."
-                style={{
-                  width: "100%", minHeight: "180px",
-                  border: "none", outline: "none", resize: "vertical",
-                  padding: "16px", fontSize: "18px", color: "var(--color-text-primary)",
-                  backgroundColor: "var(--color-card)", fontFamily: "Inter, sans-serif",
-                  fontWeight: bold ? 700 : 400,
-                  fontStyle: italic ? "italic" : "normal",
-                  boxSizing: "border-box",
-                }}
-              />
-            </div>
-          </div>
         </div>
 
-        {/* Right column — preview */}
-        <div style={{
-          width: "337px", flexShrink: 0,
-          backgroundColor: "var(--color-card)", border: "2px solid var(--color-border-light)",
-          borderRadius: "13px", overflow: "hidden",
-          minHeight: "787px",
-        }}>
-          <div style={{ padding: "20px 24px", borderBottom: "2px solid var(--color-border-card)" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "6px" }}>
-              <span style={{ fontSize: "16px", opacity: 0.6 }}>👁</span>
-              <span style={{ fontSize: "15px", fontWeight: 600, color: "var(--color-text-light)", textTransform: "uppercase", letterSpacing: "0.5px" }}>
-                Предпросмотр для студента
-              </span>
-            </div>
-          </div>
+        {/* Create form */}
+        {showForm && (
+          <div style={{
+            backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)",
+            borderRadius: "14px", padding: "24px", marginBottom: "24px",
+          }}>
+            <h2 style={{ fontSize: "18px", fontWeight: 700, color: "var(--color-text-primary)", margin: "0 0 20px" }}>
+              Новое задание
+            </h2>
 
-          <div style={{ padding: "20px 24px" }}>
-            {title ? (
-              <>
-                <h3 style={{ fontSize: "20px", fontWeight: 600, color: "var(--color-text-primary)", margin: "0 0 8px" }}>{title}</h3>
-                {deadline && (
-                  <p style={{ fontSize: "14px", color: "var(--color-text-subtle)", margin: "0 0 12px" }}>
-                    Дедлайн: {deadline}
-                  </p>
-                )}
-              </>
-            ) : (
-              <p style={{ fontSize: "20px", fontWeight: 600, color: "var(--color-text-subtle)", margin: "0 0 8px" }}>Название задании</p>
-            )}
-
-            <div style={{ marginTop: "40px", textAlign: "center" }}>
-              {comment || fileName ? (
-                <p style={{
-                  fontSize: "16px", color: "var(--color-text-muted)", lineHeight: "1.6",
-                  fontWeight: bold ? 700 : 400,
-                  fontStyle: italic ? "italic" : "normal",
+            {/* Mode toggle */}
+            <div style={{ display: "flex", gap: "8px", marginBottom: "18px" }}>
+              {(["text", "file"] as const).map((m) => (
+                <button key={m} onClick={() => setMode(m)} style={{
+                  height: "36px", padding: "0 18px", borderRadius: "8px",
+                  backgroundColor: mode === m ? "var(--color-accent)" : "var(--color-bg-alt)",
+                  color: mode === m ? "white" : "var(--color-text-muted)",
+                  border: `1px solid ${mode === m ? "var(--color-accent)" : "var(--color-border-input)"}`,
+                  fontSize: "14px", fontWeight: 600, cursor: "pointer",
                 }}>
-                  {comment || `Файл: ${fileName}`}
-                </p>
-              ) : (
-                <>
-                  <div style={{
-                    width: "66px", height: "66px", borderRadius: "50%",
-                    backgroundColor: "var(--color-card-input)", margin: "80px auto 16px",
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                  }}>
-                    <Image src="/assets/icons/historical-icon.png" alt="" width={31} height={31} className="object-contain" />
-                  </div>
-                  <p style={{ fontSize: "18px", color: "var(--color-text-light)", lineHeight: "1.65", maxWidth: "245px", margin: "0 auto" }}>
-                    Описание задачи появится здесь после заполнения поля «Комментарии» или загрузки ZIP-файла
-                  </p>
-                </>
-              )}
+                  {m === "text" ? "✏️ Текстом" : "📎 Файл (.txt .md .pdf .docx)"}
+                </button>
+              ))}
             </div>
+
+            <form onSubmit={handleCreate} style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+              <input
+                type="text" placeholder="Название задания" value={title}
+                onChange={(e) => setTitle(e.target.value)} required style={inputStyle}
+              />
+
+              {mode === "text" ? (
+                <textarea
+                  placeholder="Описание задания — требования, примеры, что студент должен реализовать..."
+                  value={description} onChange={(e) => setDescription(e.target.value)} rows={6}
+                  style={{
+                    padding: "12px 14px", borderRadius: "10px",
+                    border: "1.5px solid var(--color-border-input)", fontSize: "14px",
+                    color: "var(--color-text-primary)", backgroundColor: "var(--color-card)",
+                    outline: "none", resize: "vertical", fontFamily: "inherit", lineHeight: "1.55",
+                  }}
+                />
+              ) : (
+                <div
+                  onClick={() => fileInputRef.current?.click()}
+                  style={{
+                    border: "2px dashed var(--color-border-input)", borderRadius: "10px",
+                    padding: "28px", textAlign: "center", cursor: "pointer",
+                    backgroundColor: "var(--color-bg-alt)",
+                  }}
+                >
+                  <input ref={fileInputRef} type="file" accept=".txt,.md,.pdf,.docx"
+                    style={{ display: "none" }} onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+                  {file
+                    ? <p style={{ fontSize: "15px", color: "var(--color-text-primary)", margin: 0 }}>📄 {file.name}</p>
+                    : <>
+                        <p style={{ fontSize: "15px", color: "var(--color-text-muted)", margin: "0 0 6px" }}>Нажмите чтобы выбрать файл</p>
+                        <p style={{ fontSize: "13px", color: "var(--color-text-subtle)", margin: 0 }}>Поддерживается: .txt .md .pdf .docx</p>
+                      </>
+                  }
+                </div>
+              )}
+
+              <p style={{ fontSize: "12px", color: "var(--color-text-subtle)", margin: 0 }}>
+                💡 После создания LLM сгенерирует критерии проверки. Статус изменится на «Готово».
+              </p>
+
+              {error && <p style={{ fontSize: "13px", color: "#e53e3e", margin: 0 }}>{error}</p>}
+
+              <button type="submit" disabled={saving} style={{
+                height: "42px", padding: "0 22px", borderRadius: "10px", alignSelf: "flex-start",
+                backgroundColor: "var(--color-btn-primary-bg)", color: "var(--color-btn-primary-color)",
+                border: "none", fontSize: "14px", fontWeight: 700, cursor: "pointer",
+                opacity: saving ? 0.6 : 1,
+              }}>
+                {saving ? "Создаём..." : "Создать задание"}
+              </button>
+            </form>
           </div>
+        )}
+
+        {/* List */}
+        <div style={{
+          backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)",
+          borderRadius: "14px", overflow: "hidden",
+        }}>
+          <div style={{ padding: "16px 24px", borderBottom: "1px solid var(--color-border-card)", backgroundColor: "var(--color-bg-alt)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <h2 style={{ fontSize: "18px", fontWeight: 700, color: "var(--color-text-primary)", margin: 0 }}>
+              Все задания ({assignments.length})
+            </h2>
+            <button onClick={loadAssignments} style={{ background: "none", border: "none", cursor: "pointer", fontSize: "18px", color: "var(--color-text-muted)" }} title="Обновить">↻</button>
+          </div>
+
+          {loading ? (
+            <div style={{ padding: "48px", textAlign: "center", color: "var(--color-text-subtle)", fontSize: "16px" }}>Загрузка...</div>
+          ) : assignments.length === 0 ? (
+            <div style={{ padding: "48px", textAlign: "center", color: "var(--color-text-subtle)", fontSize: "15px" }}>Заданий нет. Создайте первое!</div>
+          ) : assignments.map((a, i) => {
+            const spec = SPEC_STATUS[a.spec_status] ?? SPEC_STATUS.pending;
+            const isExpanded = expandedSpec === a.id;
+            const checks = a.llm_spec?.checks ?? [];
+            return (
+              <div key={a.id} style={{ borderBottom: i < assignments.length - 1 ? "1px solid var(--color-border-card)" : "none" }}>
+                <div style={{ padding: "16px 24px", display: "flex", alignItems: "center", gap: "16px" }}>
+                  <div style={{ flex: 1 }}>
+                    <p style={{ margin: "0 0 4px", fontSize: "16px", fontWeight: 600, color: "var(--color-text-primary)" }}>{a.title}</p>
+                    <p style={{ margin: 0, fontSize: "12px", color: "var(--color-text-subtle)" }}>Создано: {a.created_at.slice(0, 10)}</p>
+                  </div>
+                  <span style={{ fontSize: "12px", fontWeight: 600, padding: "3px 12px", borderRadius: "12px", backgroundColor: spec.bg, color: spec.color, whiteSpace: "nowrap" }}>
+                    {spec.label}
+                  </span>
+                  {a.llm_spec && (
+                    <button
+                      onClick={() => setExpandedSpec(isExpanded ? null : a.id)}
+                      style={{
+                        height: "32px", padding: "0 14px", borderRadius: "8px",
+                        backgroundColor: isExpanded ? "var(--color-accent)" : "var(--color-bg-alt)",
+                        color: isExpanded ? "white" : "var(--color-text-muted)",
+                        border: `1px solid ${isExpanded ? "var(--color-accent)" : "var(--color-border-input)"}`,
+                        fontSize: "13px", cursor: "pointer",
+                      }}
+                    >
+                      {isExpanded ? "Скрыть spec" : "Просмотр spec"}
+                    </button>
+                  )}
+                  <button
+                    onClick={() => handleDelete(a.id, a.title)}
+                    style={{ height: "32px", padding: "0 14px", borderRadius: "8px", backgroundColor: "#fee2e2", color: "#b91c1c", border: "none", fontSize: "13px", fontWeight: 600, cursor: "pointer" }}
+                  >
+                    Удалить
+                  </button>
+                </div>
+
+                {isExpanded && a.llm_spec && (
+                  <div style={{ padding: "16px 24px", backgroundColor: "var(--color-bg-alt)", borderTop: "1px solid var(--color-border-card)" }}>
+                    <p style={{ fontSize: "12px", fontWeight: 700, color: "var(--color-text-subtle)", textTransform: "uppercase", letterSpacing: "0.5px", margin: "0 0 12px" }}>
+                      Критерии проверки (spec)
+                    </p>
+                    {checks.length > 0
+                      ? checks.map((c, ci) => (
+                          <div key={ci} style={{ display: "flex", gap: "12px", padding: "8px 0", borderBottom: ci < checks.length - 1 ? "1px solid var(--color-border-card)" : "none" }}>
+                            <span style={{ fontSize: "12px", fontWeight: 700, color: "var(--color-accent)", flexShrink: 0, minWidth: "32px" }}>
+                              {Math.round(c.weight * 100)}%
+                            </span>
+                            <div>
+                              <p style={{ margin: "0 0 2px", fontSize: "13px", fontWeight: 600, color: "var(--color-text-primary)" }}>{c.id}</p>
+                              <p style={{ margin: 0, fontSize: "12px", color: "var(--color-text-muted)" }}>{c.description}</p>
+                            </div>
+                          </div>
+                        ))
+                      : <pre style={{ fontSize: "12px", color: "var(--color-text-muted)", overflow: "auto", maxHeight: "300px", margin: 0 }}>{JSON.stringify(a.llm_spec, null, 2)}</pre>
+                    }
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>
