@@ -1,0 +1,76 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build Next.js frontend
+        working-directory: frontend
+        env:
+          NEXT_PUBLIC_API_URL: https://dellover.live
+        run: |
+          npm ci
+          npm run build
+
+      - name: Upload frontend build to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: 159.89.0.231
+          username: nurassyl
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 2222
+          source: "frontend/.next/standalone/,frontend/.next/static/,frontend/public/"
+          target: "/tmp/autochecker-build"
+          strip_components: 1
+
+      - name: Deploy on server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 159.89.0.231
+          username: nurassyl
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 2222
+          script: |
+            set -e
+
+            echo "==> Pull latest code"
+            cd /home/nurassyl/autochecker
+            git pull origin main
+
+            echo "==> Update Python dependencies"
+            source .venv/bin/activate
+            pip install -r requirements.txt -q
+
+            echo "==> Update frontend"
+            rsync -a --delete /tmp/autochecker-build/frontend/.next/standalone/ /home/nurassyl/autochecker-frontend/
+            rsync -a --delete /tmp/autochecker-build/frontend/.next/static/ /home/nurassyl/autochecker-frontend/.next/static/
+            rsync -a --delete /tmp/autochecker-build/frontend/public/ /home/nurassyl/autochecker-frontend/public/
+            rm -rf /tmp/autochecker-build
+
+            echo "==> Restart services"
+            sudo systemctl restart autochecker-api autochecker-bot autochecker-frontend
+
+            echo "==> Health check"
+            sleep 3
+            curl -sf http://127.0.0.1:8001/auth/login -X POST \
+              -H 'Content-Type: application/json' \
+              -d '{}' -o /dev/null || true
+            curl -sf http://127.0.0.1:3001/ -o /dev/null
+            echo "Deploy complete!"
