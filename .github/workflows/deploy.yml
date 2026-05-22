@@ -24,7 +24,7 @@ jobs:
       - name: Build Next.js frontend
         working-directory: frontend
         env:
-          NEXT_PUBLIC_API_URL: https://dellover.live
+          NEXT_PUBLIC_API_URL: https://dellover.live/api
         run: |
           npm ci
           npm run build
