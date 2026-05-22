@@ -58,9 +58,9 @@ jobs:
             $HOME/.local/bin/uv pip install -r requirements.txt --python .venv/bin/python -q
 
             echo "==> Update frontend"
-            rsync -a --delete /tmp/autochecker-build/frontend/.next/standalone/ /home/nurassyl/autochecker-frontend/
-            rsync -a --delete /tmp/autochecker-build/frontend/.next/static/ /home/nurassyl/autochecker-frontend/.next/static/
-            rsync -a --delete /tmp/autochecker-build/frontend/public/ /home/nurassyl/autochecker-frontend/public/
+            rsync -a --delete /tmp/autochecker-build/.next/standalone/ /home/nurassyl/autochecker-frontend/
+            rsync -a --delete /tmp/autochecker-build/.next/static/ /home/nurassyl/autochecker-frontend/.next/static/
+            rsync -a --delete /tmp/autochecker-build/public/ /home/nurassyl/autochecker-frontend/public/
             rm -rf /tmp/autochecker-build
 
             echo "==> Restart services"
