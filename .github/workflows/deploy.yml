@@ -55,8 +55,7 @@ jobs:
             git pull origin main
 
             echo "==> Update Python dependencies"
-            source .venv/bin/activate
-            pip install -r requirements.txt -q
+            .venv/bin/pip install -r requirements.txt -q
 
             echo "==> Update frontend"
             rsync -a --delete /tmp/autochecker-build/frontend/.next/standalone/ /home/nurassyl/autochecker-frontend/
