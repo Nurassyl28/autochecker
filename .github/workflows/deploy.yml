@@ -58,8 +58,8 @@ jobs:
             $HOME/.local/bin/uv pip install -r requirements.txt --python .venv/bin/python -q
 
             echo "==> Run DB migrations"
-            cat /home/nurassyl/autochecker/db/migrate_add_repo_hash.sql | docker exec -i $(docker ps -qf name=postgres) psql -U autochecker -d autochecker || true
-            cat /home/nurassyl/autochecker/db/migrate_add_reference_solution.sql | docker exec -i $(docker ps -qf name=postgres) psql -U autochecker -d autochecker || true
+            cat /home/nurassyl/autochecker/db/migrate_add_repo_hash.sql | docker exec -i autochecker-db psql -U autochecker -d autochecker || true
+            cat /home/nurassyl/autochecker/db/migrate_add_reference_solution.sql | docker exec -i autochecker-db psql -U autochecker -d autochecker || true
 
             echo "==> Update frontend"
             rsync -a --delete /tmp/autochecker-build/.next/standalone/ /home/nurassyl/autochecker-frontend/
