@@ -77,7 +77,11 @@ export default function SubmissionDetailPage() {
 
   const scorePct = sub.score != null ? Math.round(sub.score * 100) : null;
   const passed = sub.pass_fail === "pass";
-  const checks = sub.feedback_json?.check_results ?? [];
+  const topChecks = sub.feedback_json?.check_results ?? [];
+  const specChecks = (sub.feedback_json as Record<string, unknown> | null)?.grading_spec
+    ? ((sub.feedback_json as Record<string, unknown>).grading_spec as Record<string, unknown>)?.check_results as CheckResult[] ?? []
+    : [];
+  const checks = topChecks.length > 0 ? topChecks : specChecks;
   const summary = sub.feedback_json?.summary ?? "";
   const teacherNote = sub.feedback_json?.teacher_note ?? "";
 
