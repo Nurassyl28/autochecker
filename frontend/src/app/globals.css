@@ -161,6 +161,17 @@ html.dark textarea,
 html.dark select {
   color-scheme: dark;
   color: var(--color-text-primary) !important;
+  background-color: var(--color-card-input) !important;
+}
+
+/* Login/admin-login pages use hardcoded white card backgrounds — fix in dark mode */
+html.dark .login-card {
+  background-color: var(--color-card) !important;
+  border-color: var(--color-border-card) !important;
+}
+html.dark .login-input-wrapper {
+  background-color: var(--color-card-input) !important;
+  border-color: var(--color-border-input) !important;
 }
 
 html.dark ::placeholder {

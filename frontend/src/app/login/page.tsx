@@ -55,7 +55,7 @@ export default function LoginPage() {
 
       {/* Main */}
       <main className="flex-1 flex items-center justify-center py-10">
-        <div className="bg-[#fefefe] border border-[#f1f0f1] rounded-[13px] w-[517px] py-10 px-12 shadow-sm">
+        <div className="login-card bg-[#fefefe] border border-[#f1f0f1] rounded-[13px] w-[517px] py-10 px-12 shadow-sm">
           {/* Welcome */}
           <p className="text-[18px] text-black text-center mb-1">С возвращением!</p>
           <p className="text-[17px] text-black text-center mb-8">
@@ -97,7 +97,7 @@ export default function LoginPage() {
               <p className="text-[14px] font-semibold text-[#5b6475] uppercase tracking-wide mb-2">
                 Электронная почта
               </p>
-              <div className="flex items-center bg-white border border-[#dfdde8] rounded-[12px] h-[60px] px-4 gap-3 focus-within:border-[#3525cd] focus-within:ring-2 focus-within:ring-[#3525cd]/10 transition-all">
+              <div className="login-input-wrapper flex items-center bg-white border border-[#dfdde8] rounded-[12px] h-[60px] px-4 gap-3 focus-within:border-[#3525cd] focus-within:ring-2 focus-within:ring-[#3525cd]/10 transition-all">
                 <Image src="/assets/icons/email-icon.png" alt="" width={24} height={24} className="object-contain opacity-60" />
                 <input
                   type="email"
@@ -115,7 +115,7 @@ export default function LoginPage() {
               <p className="text-[14px] font-semibold text-[#5b6475] uppercase tracking-wide mb-2">
                 Пароль
               </p>
-              <div className="flex items-center bg-white border border-[#dfdde8] rounded-[12px] h-[60px] px-4 gap-3 focus-within:border-[#3525cd] focus-within:ring-2 focus-within:ring-[#3525cd]/10 transition-all">
+              <div className="login-input-wrapper flex items-center bg-white border border-[#dfdde8] rounded-[12px] h-[60px] px-4 gap-3 focus-within:border-[#3525cd] focus-within:ring-2 focus-within:ring-[#3525cd]/10 transition-all">
                 <Image src="/assets/icons/lock-icon.png" alt="" width={24} height={24} className="object-contain opacity-60" />
                 <input
                   type={showPassword ? "text" : "password"}

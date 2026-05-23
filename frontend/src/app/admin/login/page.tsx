@@ -59,7 +59,7 @@ function AdminLoginForm() {
       </header>
 
       <main style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <div style={{
+        <div className="login-card" style={{
           backgroundColor: "white", border: "1px solid #f1f0f1",
           borderRadius: "14px", width: "440px",
           padding: "40px 44px",
@@ -95,8 +95,8 @@ function AdminLoginForm() {
                 style={{
                   width: "100%", height: "52px",
                   border: "1.5px solid #dfdde8", borderRadius: "12px",
-                  padding: "0 16px", fontSize: "16px", color: "#333",
-                  backgroundColor: "white", outline: "none", boxSizing: "border-box",
+                  padding: "0 16px", fontSize: "16px",
+                  outline: "none", boxSizing: "border-box",
                 }}
               />
             </div>
@@ -108,7 +108,7 @@ function AdminLoginForm() {
               }}>
                 Пароль
               </label>
-              <div style={{
+              <div className="login-input-wrapper" style={{
                 display: "flex", alignItems: "center",
                 border: "1.5px solid #dfdde8", borderRadius: "12px", overflow: "hidden",
               }}>
@@ -121,8 +121,7 @@ function AdminLoginForm() {
                   style={{
                     flex: 1, height: "52px",
                     border: "none", outline: "none",
-                    padding: "0 16px", fontSize: "16px", color: "#333",
-                    backgroundColor: "white",
+                    padding: "0 16px", fontSize: "16px",
                   }}
                 />
                 <button

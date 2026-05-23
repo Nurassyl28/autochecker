@@ -9,7 +9,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPExcepti
 
 from .. import database as db
 from ..auth import hash_password
-from ..dependencies import require_admin
+from ..dependencies import require_admin, require_teacher
 from ..llm.spec_generator import generate_spec
 from ..models import AssignmentCreate, AssignmentResponse, SubmissionResponse, UserCreate, UserResponse
 
@@ -240,7 +240,7 @@ async def delete_assignment(assignment_id: int, admin: dict = Depends(require_ad
 # ── Classes ───────────────────────────────────────────────────────────────────
 
 @router.get("/classes")
-async def list_classes(admin: dict = Depends(require_admin)):
+async def list_classes(admin: dict = Depends(require_teacher)):
     rows = await db.fetchall(
         """
         SELECT c.id, c.name, c.created_at,
@@ -260,7 +260,7 @@ async def list_classes(admin: dict = Depends(require_admin)):
 
 
 @router.post("/classes", status_code=201)
-async def create_class(body: dict, admin: dict = Depends(require_admin)):
+async def create_class(body: dict, admin: dict = Depends(require_teacher)):
     name = (body.get("name") or "").strip()
     if not name:
         raise HTTPException(400, "Class name is required")
@@ -296,7 +296,7 @@ async def create_class(body: dict, admin: dict = Depends(require_admin)):
 
 
 @router.get("/classes/{class_id}")
-async def get_class(class_id: int, admin: dict = Depends(require_admin)):
+async def get_class(class_id: int, admin: dict = Depends(require_teacher)):
     cls = await db.fetchone(
         """
         SELECT c.id, c.name, c.created_at, c.teacher_id,
@@ -325,7 +325,7 @@ async def get_class(class_id: int, admin: dict = Depends(require_admin)):
 
 
 @router.patch("/classes/{class_id}")
-async def update_class(class_id: int, body: dict, admin: dict = Depends(require_admin)):
+async def update_class(class_id: int, body: dict, admin: dict = Depends(require_teacher)):
     cls = await db.fetchone(
         "SELECT id FROM classes WHERE id = %s AND university_id = %s",
         (class_id, admin["university_id"]),
@@ -343,7 +343,7 @@ async def update_class(class_id: int, body: dict, admin: dict = Depends(require_
 
 
 @router.post("/classes/{class_id}/members", status_code=201)
-async def add_class_members(class_id: int, body: dict, admin: dict = Depends(require_admin)):
+async def add_class_members(class_id: int, body: dict, admin: dict = Depends(require_teacher)):
     cls = await db.fetchone(
         "SELECT id FROM classes WHERE id = %s AND university_id = %s",
         (class_id, admin["university_id"]),
@@ -367,7 +367,7 @@ async def add_class_members(class_id: int, body: dict, admin: dict = Depends(req
 
 
 @router.delete("/classes/{class_id}/members/{student_id}", status_code=204)
-async def remove_class_member(class_id: int, student_id: int, admin: dict = Depends(require_admin)):
+async def remove_class_member(class_id: int, student_id: int, admin: dict = Depends(require_teacher)):
     cls = await db.fetchone(
         "SELECT id FROM classes WHERE id = %s AND university_id = %s",
         (class_id, admin["university_id"]),
@@ -381,7 +381,7 @@ async def remove_class_member(class_id: int, student_id: int, admin: dict = Depe
 
 
 @router.delete("/classes/{class_id}", status_code=204)
-async def delete_class(class_id: int, admin: dict = Depends(require_admin)):
+async def delete_class(class_id: int, admin: dict = Depends(require_teacher)):
     await db.execute(
         "DELETE FROM classes WHERE id = %s AND university_id = %s",
         (class_id, admin["university_id"]),
