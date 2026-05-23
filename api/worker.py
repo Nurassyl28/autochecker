@@ -10,6 +10,7 @@ Flow:
   6. Push result to student via Telegram bot API
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -25,6 +26,15 @@ logger = logging.getLogger(__name__)
 
 TG_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+
+
+def _compute_repo_hash(files: list[dict]) -> str:
+    """SHA256 of sorted file paths + contents. Changes if any file changes."""
+    h = hashlib.sha256()
+    for f in sorted(files, key=lambda x: x["path"]):
+        h.update(f["path"].encode())
+        h.update(f["content"].encode())
+    return h.hexdigest()
 
 
 def _parse_github_url(url: str) -> tuple[str, str] | None:
@@ -144,19 +154,21 @@ async def process_submission(submission_id: int) -> None:
             await _fail(submission_id, "Could not read repository. Check that it is public.", row.get("tg_id"))
             return
 
-        # Cache: reuse result if same repo was already graded for this assignment
+        repo_hash = _compute_repo_hash(files)
+
+        # Cache: reuse result only if repo CONTENT is identical (same hash)
         cached = await db.fetchone(
-            """SELECT feedback_json, pass_fail, score FROM submissions
+            """SELECT feedback_json FROM submissions
                WHERE assignment_id = (SELECT assignment_id FROM submissions WHERE id = %s)
-                 AND repo_url = %s AND status = 'done' AND id != %s
+                 AND repo_hash = %s AND status = 'done' AND id != %s
                ORDER BY completed_at DESC LIMIT 1""",
-            (submission_id, row["repo_url"], submission_id),
+            (submission_id, repo_hash, submission_id),
         )
         if cached and cached["feedback_json"]:
             result = cached["feedback_json"]
             if isinstance(result, str):
                 result = json.loads(result)
-            logger.info("Reusing cached result for submission %s", submission_id)
+            logger.info("Reusing cached result for submission %s (hash=%s)", submission_id, repo_hash[:8])
         else:
             snapshot = build_repo_snapshot(files)
             result = await check_repo(spec, snapshot)
@@ -167,10 +179,10 @@ async def process_submission(submission_id: int) -> None:
             """
             UPDATE submissions
             SET status = 'done', pass_fail = %s, score = %s,
-                feedback_json = %s::jsonb, completed_at = %s
+                feedback_json = %s::jsonb, completed_at = %s, repo_hash = %s
             WHERE id = %s
             """,
-            (result["pass_fail"], result.get("score"), feedback_json, now, submission_id),
+            (result["pass_fail"], result.get("score"), feedback_json, now, repo_hash, submission_id),
         )
 
         tg_id = row.get("tg_id")
