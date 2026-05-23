@@ -45,37 +45,55 @@ def _parse_github_url(url: str) -> tuple[str, str] | None:
     return None
 
 
+def _file_priority(path: str) -> int:
+    """Lower number = fetched first. Puts student source files before tests/configs."""
+    lower = path.lower()
+    name = lower.split("/")[-1]
+    # Skip student test files — they don't show implementation
+    if name.startswith("test_") or name.endswith("_test.py"):
+        return 99
+    depth = path.count("/")
+    if depth == 0 and lower.endswith(".py"):   # root-level .py → highest priority
+        return 0
+    if lower.endswith(".py"):
+        return 1 + depth
+    if lower.endswith((".js", ".ts", ".java", ".c", ".cpp", ".go", ".rs")):
+        return 10 + depth
+    if name in ("readme.md", "requirements.txt", "dockerfile", "docker-compose.yml"):
+        return 20
+    return 50
+
+
 def _fetch_repo_files(owner: str, repo: str) -> list[dict]:
-    """Return list of {path, content} dicts from the default branch."""
+    """Return list of {path, content} dicts, prioritised by relevance."""
     headers = {"Accept": "application/vnd.github.v3+json"}
     if GITHUB_TOKEN:
         headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
 
-    # Get the default branch tree (recursive)
     api = f"https://api.github.com/repos/{owner}/{repo}/git/trees/HEAD?recursive=1"
     resp = requests.get(api, headers=headers, timeout=30)
     if resp.status_code != 200:
         return []
 
-    tree = resp.json().get("tree", [])
-    files = []
-    skipped_exts = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".ttf", ".zip", ".pdf"}
+    skipped_exts = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".ttf", ".zip", ".pdf", ".pyc"}
+    blobs = [
+        item for item in resp.json().get("tree", [])
+        if item["type"] == "blob" and not any(item["path"].endswith(e) for e in skipped_exts)
+    ]
+    # Sort by priority so we fetch the most relevant files first
+    blobs.sort(key=lambda x: _file_priority(x["path"]))
 
-    for item in tree:
-        if item["type"] != "blob":
-            continue
+    files = []
+    for item in blobs:
         path: str = item["path"]
-        if any(path.endswith(ext) for ext in skipped_exts):
-            continue
-        # Fetch raw content
         raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{path}"
         try:
             r = requests.get(raw_url, headers=headers, timeout=15)
             if r.status_code == 200:
-                files.append({"path": path, "content": r.text[:8000]})
+                files.append({"path": path, "content": r.text[:10_000]})
         except Exception:
             continue
-        if len(files) >= 50:  # cap at 50 files
+        if len(files) >= 40:  # cap: 40 prioritised files is enough
             break
     return files
 
