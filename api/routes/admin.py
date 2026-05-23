@@ -123,11 +123,11 @@ async def create_assignment(
 ):
     row = await db.execute_returning(
         """
-        INSERT INTO assignments (university_id, title, description_text, created_by)
-        VALUES (%s, %s, %s, %s)
-        RETURNING id, university_id, title, description_text, spec_status, llm_spec, created_by, created_at
+        INSERT INTO assignments (university_id, title, description_text, reference_solution, created_by)
+        VALUES (%s, %s, %s, %s, %s)
+        RETURNING id, university_id, title, description_text, spec_status, llm_spec, created_by, created_at, reference_solution
         """,
-        (admin["university_id"], body.title, body.description_text, admin["id"]),
+        (admin["university_id"], body.title, body.description_text, body.reference_solution, admin["id"]),
     )
     background_tasks.add_task(_trigger_spec_generation, row["id"], body.description_text)
     return AssignmentResponse(**row)
@@ -151,7 +151,7 @@ async def create_assignment_from_file(
         """
         INSERT INTO assignments (university_id, title, description_text, created_by)
         VALUES (%s, %s, %s, %s)
-        RETURNING id, university_id, title, description_text, spec_status, llm_spec, created_by, created_at
+        RETURNING id, university_id, title, description_text, spec_status, llm_spec, created_by, created_at, reference_solution
         """,
         (admin["university_id"], title, description_text, admin["id"]),
     )
@@ -184,7 +184,7 @@ def _extract_text(data: bytes, filename: str) -> str:
 @router.get("/assignments", response_model=list[AssignmentResponse])
 async def list_assignments(admin: dict = Depends(require_admin)):
     rows = await db.fetchall(
-        "SELECT id, university_id, title, description_text, spec_status, llm_spec, created_by, created_at FROM assignments WHERE university_id = %s ORDER BY created_at DESC",
+        "SELECT id, university_id, title, description_text, spec_status, llm_spec, created_by, created_at, reference_solution FROM assignments WHERE university_id = %s ORDER BY created_at DESC",
         (admin["university_id"],),
     )
     return [AssignmentResponse(**r) for r in rows]
@@ -193,7 +193,7 @@ async def list_assignments(admin: dict = Depends(require_admin)):
 @router.get("/assignments/{assignment_id}", response_model=AssignmentResponse)
 async def get_assignment(assignment_id: int, admin: dict = Depends(require_admin)):
     row = await db.fetchone(
-        "SELECT id, university_id, title, description_text, spec_status, llm_spec, created_by, created_at FROM assignments WHERE id = %s AND university_id = %s",
+        "SELECT id, university_id, title, description_text, spec_status, llm_spec, created_by, created_at, reference_solution FROM assignments WHERE id = %s AND university_id = %s",
         (assignment_id, admin["university_id"]),
     )
     if not row:

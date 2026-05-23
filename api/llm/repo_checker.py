@@ -7,7 +7,8 @@ SYSTEM_PROMPT = """You are an automated grading assistant for programming assign
 
 You receive:
 1. A grading spec (JSON) describing what to check in the student's code.
-2. A snapshot of the student's repository files.
+2. Optionally, a reference solution (correct answer from the teacher) — use it to compare logic and approach.
+3. A snapshot of the student's repository files.
 
 Return ONLY a JSON object in this exact shape — no markdown, no explanation:
 
@@ -46,8 +47,12 @@ Response:
 """
 
 
-async def check_repo(spec: dict, repo_snapshot: str) -> dict:
-    user_msg = f"Spec:\n{json.dumps(spec, indent=2)}\n\nRepo content:\n{repo_snapshot}"
+async def check_repo(spec: dict, repo_snapshot: str, reference_solution: str | None = None) -> dict:
+    parts = [f"Spec:\n{json.dumps(spec, indent=2)}"]
+    if reference_solution and reference_solution.strip():
+        parts.append(f"Reference solution (correct answer from teacher):\n{reference_solution.strip()}")
+    parts.append(f"Student repo content:\n{repo_snapshot}")
+    user_msg = "\n\n".join(parts)
 
     if LLM_PROVIDER == "anthropic":
         raw = await _check_anthropic(user_msg)

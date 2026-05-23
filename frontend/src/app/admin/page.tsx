@@ -90,7 +90,7 @@ export default function AdminPage() {
   const [assignmentsLoading, setAssignmentsLoading] = useState(true);
   const [showCreateAssignment, setShowCreateAssignment] = useState(false);
   const [assignMode, setAssignMode] = useState<"text" | "file">("text");
-  const [newAssignment, setNewAssignment] = useState({ title: "", description_text: "" });
+  const [newAssignment, setNewAssignment] = useState({ title: "", description_text: "", reference_solution: "" });
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [createAssignmentLoading, setCreateAssignmentLoading] = useState(false);
   const [createAssignmentError, setCreateAssignmentError] = useState("");
@@ -182,13 +182,16 @@ export default function AdminPage() {
       res = await fetch(`${BASE_URL}/admin/assignments`, {
         method: "POST",
         headers: adminHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify(newAssignment),
+        body: JSON.stringify({
+          ...newAssignment,
+          reference_solution: newAssignment.reference_solution.trim() || null,
+        }),
       });
     }
 
     if (res.ok) {
       setShowCreateAssignment(false);
-      setNewAssignment({ title: "", description_text: "" });
+      setNewAssignment({ title: "", description_text: "", reference_solution: "" });
       setUploadFile(null);
       await loadAssignments();
     } else {
@@ -340,9 +343,23 @@ export default function AdminPage() {
                     style={{ ...inputStyle, height: "40px", width: "100%" }} />
 
                   {assignMode === "text" ? (
-                    <textarea placeholder="Описание задания..." required rows={5} value={newAssignment.description_text}
-                      onChange={(e) => setNewAssignment((p) => ({ ...p, description_text: e.target.value }))}
-                      style={{ padding: "10px 12px", border: "1px solid #d1d5db", borderRadius: "8px", fontSize: "14px", outline: "none", resize: "vertical", fontFamily: "inherit" }} />
+                    <>
+                      <textarea placeholder="Описание задания..." required rows={5} value={newAssignment.description_text}
+                        onChange={(e) => setNewAssignment((p) => ({ ...p, description_text: e.target.value }))}
+                        style={{ padding: "10px 12px", border: "1px solid #d1d5db", borderRadius: "8px", fontSize: "14px", outline: "none", resize: "vertical", fontFamily: "inherit" }} />
+                      <div>
+                        <p style={{ fontSize: "13px", fontWeight: 600, color: "#374151", margin: "0 0 6px" }}>
+                          ✅ Эталонное решение <span style={{ fontWeight: 400, color: "#9ca3af" }}>(необязательно — для более точной проверки)</span>
+                        </p>
+                        <textarea
+                          placeholder="Вставьте правильный код или описание правильного решения..."
+                          rows={6}
+                          value={newAssignment.reference_solution}
+                          onChange={(e) => setNewAssignment((p) => ({ ...p, reference_solution: e.target.value }))}
+                          style={{ padding: "10px 12px", border: "1px solid #d1d5db", borderRadius: "8px", fontSize: "13px", outline: "none", resize: "vertical", fontFamily: "monospace", width: "100%", boxSizing: "border-box" }}
+                        />
+                      </div>
+                    </>
                   ) : (
                     <div onClick={() => fileInputRef.current?.click()}
                       style={{ border: "2px dashed #d1d5db", borderRadius: "8px", padding: "20px", textAlign: "center", cursor: "pointer", backgroundColor: "white" }}>

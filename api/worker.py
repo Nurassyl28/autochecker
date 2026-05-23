@@ -144,7 +144,7 @@ async def process_submission(submission_id: int) -> None:
         row = await db.fetchone(
             """
             SELECT s.id, s.repo_url, s.student_id,
-                   a.title AS assignment_title, a.llm_spec,
+                   a.title AS assignment_title, a.llm_spec, a.reference_solution,
                    u.tg_id
             FROM submissions s
             JOIN assignments a ON a.id = s.assignment_id
@@ -189,7 +189,7 @@ async def process_submission(submission_id: int) -> None:
             logger.info("Reusing cached result for submission %s (hash=%s)", submission_id, repo_hash[:8])
         else:
             snapshot = build_repo_snapshot(files)
-            result = await check_repo(spec, snapshot)
+            result = await check_repo(spec, snapshot, reference_solution=row.get("reference_solution"))
 
         feedback_json = json.dumps(result)
         now = datetime.now(timezone.utc)
