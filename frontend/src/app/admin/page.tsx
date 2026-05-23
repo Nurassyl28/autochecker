@@ -92,6 +92,9 @@ export default function AdminPage() {
   const [assignMode, setAssignMode] = useState<"text" | "file">("text");
   const [newAssignment, setNewAssignment] = useState({ title: "", description_text: "", reference_solution: "" });
   const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [refSolMode, setRefSolMode] = useState<"text" | "file">("text");
+  const [refSolFile, setRefSolFile] = useState<File | null>(null);
+  const refSolFileRef = useRef<HTMLInputElement>(null);
   const [createAssignmentLoading, setCreateAssignmentLoading] = useState(false);
   const [createAssignmentError, setCreateAssignmentError] = useState("");
   const [expandedSpec, setExpandedSpec] = useState<number | null>(null);
@@ -176,6 +179,11 @@ export default function AdminPage() {
       const fd = new FormData();
       fd.append("title", newAssignment.title.trim());
       fd.append("file", uploadFile);
+      if (refSolMode === "file" && refSolFile) {
+        fd.append("reference_solution_file", refSolFile);
+      } else if (newAssignment.reference_solution.trim()) {
+        fd.append("reference_solution", newAssignment.reference_solution.trim());
+      }
       res = await fetch(`${BASE_URL}/admin/assignments/upload`, { method: "POST", headers: adminHeaders(), body: fd });
     } else {
       if (!newAssignment.description_text.trim()) { setCreateAssignmentError("Введите описание"); setCreateAssignmentLoading(false); return; }
@@ -193,6 +201,8 @@ export default function AdminPage() {
       setShowCreateAssignment(false);
       setNewAssignment({ title: "", description_text: "", reference_solution: "" });
       setUploadFile(null);
+      setRefSolFile(null);
+      setRefSolMode("text");
       await loadAssignments();
     } else {
       const err = await res.json().catch(() => ({}));
@@ -343,23 +353,9 @@ export default function AdminPage() {
                     style={{ ...inputStyle, height: "40px", width: "100%" }} />
 
                   {assignMode === "text" ? (
-                    <>
-                      <textarea placeholder="Описание задания..." required rows={5} value={newAssignment.description_text}
-                        onChange={(e) => setNewAssignment((p) => ({ ...p, description_text: e.target.value }))}
-                        style={{ padding: "10px 12px", border: "1px solid #d1d5db", borderRadius: "8px", fontSize: "14px", outline: "none", resize: "vertical", fontFamily: "inherit" }} />
-                      <div>
-                        <p style={{ fontSize: "13px", fontWeight: 600, color: "#374151", margin: "0 0 6px" }}>
-                          ✅ Эталонное решение <span style={{ fontWeight: 400, color: "#9ca3af" }}>(необязательно — для более точной проверки)</span>
-                        </p>
-                        <textarea
-                          placeholder="Вставьте правильный код или описание правильного решения..."
-                          rows={6}
-                          value={newAssignment.reference_solution}
-                          onChange={(e) => setNewAssignment((p) => ({ ...p, reference_solution: e.target.value }))}
-                          style={{ padding: "10px 12px", border: "1px solid #d1d5db", borderRadius: "8px", fontSize: "13px", outline: "none", resize: "vertical", fontFamily: "monospace", width: "100%", boxSizing: "border-box" }}
-                        />
-                      </div>
-                    </>
+                    <textarea placeholder="Описание задания..." required rows={5} value={newAssignment.description_text}
+                      onChange={(e) => setNewAssignment((p) => ({ ...p, description_text: e.target.value }))}
+                      style={{ padding: "10px 12px", border: "1px solid #d1d5db", borderRadius: "8px", fontSize: "14px", outline: "none", resize: "vertical", fontFamily: "inherit" }} />
                   ) : (
                     <div onClick={() => fileInputRef.current?.click()}
                       style={{ border: "2px dashed #d1d5db", borderRadius: "8px", padding: "20px", textAlign: "center", cursor: "pointer", backgroundColor: "white" }}>
@@ -369,6 +365,40 @@ export default function AdminPage() {
                         : <p style={{ margin: 0, fontSize: "14px", color: "#6b7280" }}>Нажмите чтобы выбрать файл (.txt .md .pdf .docx)</p>}
                     </div>
                   )}
+
+                  {/* Reference solution — optional, always visible */}
+                  <div style={{ borderTop: "1px solid #e5e7eb", paddingTop: "14px" }}>
+                    <p style={{ fontSize: "13px", fontWeight: 600, color: "#374151", margin: "0 0 8px" }}>
+                      ✅ Эталонное решение
+                      <span style={{ fontWeight: 400, color: "#9ca3af", marginLeft: "6px" }}>необязательно — LLM будет сравнивать с ним код студента</span>
+                    </p>
+                    <div style={{ display: "flex", gap: "6px", marginBottom: "8px" }}>
+                      {(["text", "file"] as const).map((m) => (
+                        <button key={m} type="button" onClick={() => setRefSolMode(m)}
+                          style={{ ...btnBase, height: "28px", padding: "0 12px", fontSize: "12px", backgroundColor: refSolMode === m ? "#142175" : "#f3f4f6", color: refSolMode === m ? "white" : "#374151" }}>
+                          {m === "text" ? "✏️ Вставить код" : "📎 Загрузить файл"}
+                        </button>
+                      ))}
+                    </div>
+                    {refSolMode === "text" ? (
+                      <textarea
+                        placeholder="Вставьте правильный код или описание правильного решения..."
+                        rows={5}
+                        value={newAssignment.reference_solution}
+                        onChange={(e) => setNewAssignment((p) => ({ ...p, reference_solution: e.target.value }))}
+                        style={{ padding: "10px 12px", border: "1px solid #d1d5db", borderRadius: "8px", fontSize: "13px", outline: "none", resize: "vertical", fontFamily: "monospace", width: "100%", boxSizing: "border-box" }}
+                      />
+                    ) : (
+                      <div onClick={() => refSolFileRef.current?.click()}
+                        style={{ border: "2px dashed #d1d5db", borderRadius: "8px", padding: "14px", textAlign: "center", cursor: "pointer", backgroundColor: "white" }}>
+                        <input ref={refSolFileRef} type="file" accept=".txt,.md,.pdf,.docx,.py,.js,.ts,.java,.cpp,.c" style={{ display: "none" }}
+                          onChange={(e) => setRefSolFile(e.target.files?.[0] ?? null)} />
+                        {refSolFile
+                          ? <p style={{ margin: 0, fontSize: "13px", color: "#111" }}>📄 {refSolFile.name}</p>
+                          : <p style={{ margin: 0, fontSize: "13px", color: "#6b7280" }}>Нажмите чтобы выбрать файл (.txt .md .pdf .docx .py .js ...)</p>}
+                      </div>
+                    )}
+                  </div>
 
                   {createAssignmentError && <p style={{ color: "#e53e3e", fontSize: "13px", margin: 0 }}>{createAssignmentError}</p>}
 

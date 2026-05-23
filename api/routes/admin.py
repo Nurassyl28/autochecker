@@ -138,6 +138,8 @@ async def create_assignment_from_file(
     background_tasks: BackgroundTasks,
     title: str = Form(...),
     file: UploadFile = File(...),
+    reference_solution: Optional[str] = Form(None),
+    reference_solution_file: Optional[UploadFile] = File(None),
     admin: dict = Depends(require_admin),
 ):
     """Create assignment from a file (txt, md, pdf, docx). Text extracted automatically."""
@@ -147,13 +149,22 @@ async def create_assignment_from_file(
     if not description_text.strip():
         raise HTTPException(400, "Could not extract text from file. Supported: txt, md, pdf, docx")
 
+    # Extract reference solution from file if provided
+    ref_sol = reference_solution or None
+    if reference_solution_file:
+        ref_content = await reference_solution_file.read()
+        ref_filename = (reference_solution_file.filename or "").lower()
+        extracted = _extract_text(ref_content, ref_filename)
+        if extracted.strip():
+            ref_sol = extracted
+
     row = await db.execute_returning(
         """
-        INSERT INTO assignments (university_id, title, description_text, created_by)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO assignments (university_id, title, description_text, reference_solution, created_by)
+        VALUES (%s, %s, %s, %s, %s)
         RETURNING id, university_id, title, description_text, spec_status, llm_spec, created_by, created_at, reference_solution
         """,
-        (admin["university_id"], title, description_text, admin["id"]),
+        (admin["university_id"], title, description_text, ref_sol, admin["id"]),
     )
     background_tasks.add_task(_trigger_spec_generation, row["id"], description_text)
     return AssignmentResponse(**row)
