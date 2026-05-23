@@ -69,7 +69,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
                             {"role": "system", "content": system},
                             {"role": "user", "content": user},
                         ],
-                        "temperature": 0.2,
+                        "temperature": 0,
                     },
                 )
 

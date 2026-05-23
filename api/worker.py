@@ -85,7 +85,7 @@ def _push_tg_message(tg_id: int, text: str) -> None:
 
 def _format_tg_message(submission: dict, result: dict, assignment_title: str) -> str:
     pf = result.get("pass_fail", "fail").upper()
-    score_pct = int((result.get("score") or 0) * 100)
+    score_pct = round((result.get("score") or 0) * 100)
     summary = result.get("summary", "")
     icon = "✅" if pf == "PASS" else "❌"
     lines = [
@@ -144,8 +144,22 @@ async def process_submission(submission_id: int) -> None:
             await _fail(submission_id, "Could not read repository. Check that it is public.", row.get("tg_id"))
             return
 
-        snapshot = build_repo_snapshot(files)
-        result = await check_repo(spec, snapshot)
+        # Cache: reuse result if same repo was already graded for this assignment
+        cached = await db.fetchone(
+            """SELECT feedback_json, pass_fail, score FROM submissions
+               WHERE assignment_id = (SELECT assignment_id FROM submissions WHERE id = %s)
+                 AND repo_url = %s AND status = 'done' AND id != %s
+               ORDER BY completed_at DESC LIMIT 1""",
+            (submission_id, row["repo_url"], submission_id),
+        )
+        if cached and cached["feedback_json"]:
+            result = cached["feedback_json"]
+            if isinstance(result, str):
+                result = json.loads(result)
+            logger.info("Reusing cached result for submission %s", submission_id)
+        else:
+            snapshot = build_repo_snapshot(files)
+            result = await check_repo(spec, snapshot)
 
         feedback_json = json.dumps(result)
         now = datetime.now(timezone.utc)
