@@ -237,6 +237,157 @@ async def delete_assignment(assignment_id: int, admin: dict = Depends(require_ad
     )
 
 
+# ── Classes ───────────────────────────────────────────────────────────────────
+
+@router.get("/classes")
+async def list_classes(admin: dict = Depends(require_admin)):
+    rows = await db.fetchall(
+        """
+        SELECT c.id, c.name, c.created_at,
+               c.teacher_id,
+               u.full_name AS teacher_name, u.email AS teacher_email,
+               COUNT(cm.student_id) AS student_count
+        FROM classes c
+        LEFT JOIN users u ON u.id = c.teacher_id
+        LEFT JOIN class_members cm ON cm.class_id = c.id
+        WHERE c.university_id = %s
+        GROUP BY c.id, u.full_name, u.email
+        ORDER BY c.created_at DESC
+        """,
+        (admin["university_id"],),
+    )
+    return [dict(r) for r in rows]
+
+
+@router.post("/classes", status_code=201)
+async def create_class(body: dict, admin: dict = Depends(require_admin)):
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "Class name is required")
+    teacher_id = body.get("teacher_id")
+    student_ids = body.get("student_ids") or []
+
+    if teacher_id:
+        teacher = await db.fetchone(
+            "SELECT id FROM users WHERE id = %s AND university_id = %s AND role = 'teacher'",
+            (teacher_id, admin["university_id"]),
+        )
+        if not teacher:
+            raise HTTPException(404, "Teacher not found")
+
+    row = await db.execute_returning(
+        "INSERT INTO classes (university_id, name, teacher_id) VALUES (%s, %s, %s) RETURNING id, name, teacher_id, created_at",
+        (admin["university_id"], name, teacher_id),
+    )
+    class_id = row["id"]
+
+    for sid in student_ids:
+        student = await db.fetchone(
+            "SELECT id FROM users WHERE id = %s AND university_id = %s AND role = 'student'",
+            (sid, admin["university_id"]),
+        )
+        if student:
+            await db.execute(
+                "INSERT INTO class_members (class_id, student_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (class_id, sid),
+            )
+
+    return dict(row)
+
+
+@router.get("/classes/{class_id}")
+async def get_class(class_id: int, admin: dict = Depends(require_admin)):
+    cls = await db.fetchone(
+        """
+        SELECT c.id, c.name, c.created_at, c.teacher_id,
+               u.full_name AS teacher_name, u.email AS teacher_email
+        FROM classes c
+        LEFT JOIN users u ON u.id = c.teacher_id
+        WHERE c.id = %s AND c.university_id = %s
+        """,
+        (class_id, admin["university_id"]),
+    )
+    if not cls:
+        raise HTTPException(404, "Class not found")
+    members = await db.fetchall(
+        """
+        SELECT u.id, u.full_name, u.email
+        FROM class_members cm
+        JOIN users u ON u.id = cm.student_id
+        WHERE cm.class_id = %s
+        ORDER BY u.full_name
+        """,
+        (class_id,),
+    )
+    result = dict(cls)
+    result["students"] = [dict(m) for m in members]
+    return result
+
+
+@router.patch("/classes/{class_id}")
+async def update_class(class_id: int, body: dict, admin: dict = Depends(require_admin)):
+    cls = await db.fetchone(
+        "SELECT id FROM classes WHERE id = %s AND university_id = %s",
+        (class_id, admin["university_id"]),
+    )
+    if not cls:
+        raise HTTPException(404, "Class not found")
+    allowed = {"name", "teacher_id"}
+    updates = {k: v for k, v in body.items() if k in allowed}
+    if not updates:
+        raise HTTPException(400, "Nothing to update")
+    set_clause = ", ".join(f"{k} = %s" for k in updates)
+    params = list(updates.values()) + [class_id]
+    await db.execute(f"UPDATE classes SET {set_clause} WHERE id = %s", tuple(params))
+    return {"ok": True}
+
+
+@router.post("/classes/{class_id}/members", status_code=201)
+async def add_class_members(class_id: int, body: dict, admin: dict = Depends(require_admin)):
+    cls = await db.fetchone(
+        "SELECT id FROM classes WHERE id = %s AND university_id = %s",
+        (class_id, admin["university_id"]),
+    )
+    if not cls:
+        raise HTTPException(404, "Class not found")
+    student_ids = body.get("student_ids") or []
+    added = 0
+    for sid in student_ids:
+        student = await db.fetchone(
+            "SELECT id FROM users WHERE id = %s AND university_id = %s AND role = 'student'",
+            (sid, admin["university_id"]),
+        )
+        if student:
+            await db.execute(
+                "INSERT INTO class_members (class_id, student_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (class_id, sid),
+            )
+            added += 1
+    return {"ok": True, "added": added}
+
+
+@router.delete("/classes/{class_id}/members/{student_id}", status_code=204)
+async def remove_class_member(class_id: int, student_id: int, admin: dict = Depends(require_admin)):
+    cls = await db.fetchone(
+        "SELECT id FROM classes WHERE id = %s AND university_id = %s",
+        (class_id, admin["university_id"]),
+    )
+    if not cls:
+        raise HTTPException(404, "Class not found")
+    await db.execute(
+        "DELETE FROM class_members WHERE class_id = %s AND student_id = %s",
+        (class_id, student_id),
+    )
+
+
+@router.delete("/classes/{class_id}", status_code=204)
+async def delete_class(class_id: int, admin: dict = Depends(require_admin)):
+    await db.execute(
+        "DELETE FROM classes WHERE id = %s AND university_id = %s",
+        (class_id, admin["university_id"]),
+    )
+
+
 # ── All submissions (admin overview) ─────────────────────────────────────────
 
 @router.get("/submissions", response_model=list[SubmissionResponse])

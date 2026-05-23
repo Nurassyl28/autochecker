@@ -84,10 +84,13 @@ function StudentHome() {
 
   const name = (typeof window !== "undefined" ? sessionStorage.getItem("user_name") : null) || "Студент";
 
-  const latestSub = (assignmentId: number): Submission | undefined =>
+  const allSubsForAssignment = (assignmentId: number): Submission[] =>
     submissions
       .filter((s) => s.assignment_id === assignmentId)
-      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0];
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+  const latestSub = (assignmentId: number): Submission | undefined =>
+    allSubsForAssignment(assignmentId)[0];
 
   const passedCount = assignments.filter((a) => latestSub(a.id)?.pass_fail === "pass").length;
   const inProgressCount = assignments.filter((a) => {
@@ -170,12 +173,9 @@ function StudentHome() {
                     : null
                   : null;
 
+                  const allSubs = allSubsForAssignment(a.id);
                 return (
-                  <div
-                    key={a.id}
-                    style={cardStyle}
-                    onClick={() => sub && router.push(`/dashboard/submissions/${sub.id}`)}
-                  >
+                  <div key={a.id} style={{ ...cardStyle, cursor: "default" }}>
                     {/* Top row: status badge + date */}
                     <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "10px" }}>
                       {taskStatus === "none" && (
@@ -227,7 +227,7 @@ function StudentHome() {
                         </p>
                         {isFailed && feedbackText && (
                           <p style={{ fontSize: "13px", color: "#b91c1c", margin: 0, lineHeight: "1.45" }}>
-                            {feedbackText.slice(0, 120)}{feedbackText.length > 120 ? "..." : ""}
+                            {feedbackText.slice(0, 200)}{feedbackText.length > 200 ? "..." : ""}
                           </p>
                         )}
                         {isFailed && !feedbackText && (
@@ -241,19 +241,69 @@ function StudentHome() {
                           </p>
                         )}
                       </div>
-                      {(isInProgress || taskStatus === "none") && (
+                      {sub && (
                         <button
-                          onClick={(e) => { e.stopPropagation(); router.push(`/dashboard/submissions/${sub?.id ?? 0}`); }}
+                          onClick={(e) => { e.stopPropagation(); router.push(`/dashboard/submissions/${sub.id}`); }}
                           style={{
                             height: "36px", padding: "0 18px", borderRadius: "8px", flexShrink: 0,
                             backgroundColor: "var(--color-btn-primary-bg)", color: "var(--color-btn-primary-color)",
                             border: "none", fontSize: "13px", fontWeight: 600, cursor: "pointer",
                           }}
                         >
-                          {isInProgress ? "Продолжить" : "Открыть"}
+                          {isInProgress ? "Продолжить" : isPassed ? "Просмотреть" : "Подробнее"}
                         </button>
                       )}
                     </div>
+
+                    {/* All attempts history */}
+                    {allSubs.length > 0 && (
+                      <div style={{ marginTop: "12px", paddingTop: "12px", borderTop: "1px solid var(--color-border)" }}>
+                        <p style={{ fontSize: "12px", fontWeight: 600, color: "var(--color-text-subtle)", margin: "0 0 6px", textTransform: "uppercase", letterSpacing: "0.4px" }}>
+                          История попыток ({allSubs.length})
+                        </p>
+                        <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                          {allSubs.map((s, idx) => {
+                            const attemptPassed = s.pass_fail === "pass";
+                            const attemptFailed = s.status === "done" && s.pass_fail === "fail";
+                            const attemptPending = s.status !== "done";
+                            const attemptScore = s.score != null ? Math.round(s.score * 100) : null;
+                            return (
+                              <div
+                                key={s.id}
+                                onClick={() => router.push(`/dashboard/submissions/${s.id}`)}
+                                style={{
+                                  display: "flex", alignItems: "center", gap: "10px",
+                                  padding: "6px 10px", borderRadius: "7px", cursor: "pointer",
+                                  backgroundColor: idx === 0 ? "var(--color-card-subtle)" : "transparent",
+                                  transition: "background 0.15s",
+                                }}
+                                onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--color-card-subtle)")}
+                                onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = idx === 0 ? "var(--color-card-subtle)" : "transparent")}
+                              >
+                                <span style={{ fontSize: "12px", color: "var(--color-text-subtle)", flexShrink: 0, minWidth: "70px" }}>
+                                  Попытка {allSubs.length - idx}
+                                </span>
+                                <span style={{
+                                  fontSize: "11px", fontWeight: 600, padding: "2px 8px", borderRadius: "10px", flexShrink: 0,
+                                  backgroundColor: attemptPassed ? "#dcfce7" : attemptFailed ? "#fee2e2" : "#eef2ff",
+                                  color: attemptPassed ? "#15803d" : attemptFailed ? "#b91c1c" : "#3730a3",
+                                }}>
+                                  {attemptPending ? "⏳ Проверяется" : attemptPassed ? "✅ Сдано" : "❌ Не сдано"}
+                                </span>
+                                {attemptScore != null && (
+                                  <span style={{ fontSize: "12px", color: "var(--color-text-muted)" }}>
+                                    {attemptScore}%
+                                  </span>
+                                )}
+                                <span style={{ fontSize: "12px", color: "var(--color-text-subtle)", marginLeft: "auto" }}>
+                                  {new Date(s.created_at).toLocaleDateString("ru-RU")}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 );
               })}

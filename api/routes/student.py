@@ -78,7 +78,7 @@ async def get_submission(submission_id: int, student: dict = Depends(require_stu
         """
         SELECT s.id, s.assignment_id, s.student_id, s.repo_url, s.status,
                s.pass_fail, s.score, s.feedback_json, s.created_at, s.completed_at,
-               a.title AS assignment_title
+               a.title AS assignment_title, a.llm_spec
         FROM submissions s
         JOIN assignments a ON a.id = s.assignment_id
         WHERE s.id = %s AND s.student_id = %s
@@ -87,7 +87,18 @@ async def get_submission(submission_id: int, student: dict = Depends(require_stu
     )
     if not row:
         raise HTTPException(404, "Submission not found")
-    return dict(row)
+    result = dict(row)
+    spec = result.pop("llm_spec", None) or {}
+    spec_checks = {c["id"]: c for c in (spec.get("checks") or [])}
+    feedback = result.get("feedback_json") or {}
+    if isinstance(feedback, dict) and spec_checks:
+        for cr in feedback.get("check_results") or []:
+            sc = spec_checks.get(cr.get("id", ""))
+            if sc:
+                cr.setdefault("weight", sc.get("weight", 0))
+                cr.setdefault("description", sc.get("description", ""))
+        result["feedback_json"] = feedback
+    return result
 
 
 @router.post("/submissions/{submission_id}/ask")

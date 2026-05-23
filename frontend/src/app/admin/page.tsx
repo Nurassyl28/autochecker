@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { adminGetUsers, adminCreateUser, adminDeleteUser, getToken } from "@/lib/api";
+import AdminClasses from "./classes";
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -36,7 +37,7 @@ interface Submission {
   created_at: string;
 }
 
-type Tab = "users" | "assignments" | "submissions";
+type Tab = "users" | "assignments" | "submissions" | "classes";
 
 const ROLE_LABELS: Record<string, { label: string; bg: string; color: string }> = {
   admin:   { label: "Админ",    bg: "#ede9fe", color: "#6d28d9" },
@@ -230,7 +231,7 @@ export default function AdminPage() {
 
         {/* Tabs */}
         <div style={{ display: "flex", gap: "4px", marginBottom: "24px", backgroundColor: "white", border: "1px solid #e5e7eb", borderRadius: "10px", padding: "4px", width: "fit-content" }}>
-          {([["users", "👤 Пользователи"], ["assignments", "📋 Задания"], ["submissions", "📨 Сдачи"]] as [Tab, string][]).map(([key, label]) => (
+          {([["users", "👤 Пользователи"], ["assignments", "📋 Задания"], ["submissions", "📨 Сдачи"], ["classes", "🏫 Классы"]] as [Tab, string][]).map(([key, label]) => (
             <button key={key} onClick={() => setTab(key)} style={{ ...btnBase, backgroundColor: tab === key ? "#142175" : "transparent", color: tab === key ? "white" : "#555", border: "none" }}>
               {label}
             </button>
@@ -427,6 +428,9 @@ export default function AdminPage() {
             })}
           </div>
         )}
+
+        {/* ── CLASSES ── */}
+        {tab === "classes" && <AdminClasses users={users} />}
 
         {/* ── SUBMISSIONS ── */}
         {tab === "submissions" && (

@@ -7,12 +7,13 @@ import { useRouter } from "next/navigation";
 import { login } from "@/lib/api";
 
 const DEMO_ACCOUNTS = [
-  { role: "teacher" as const, label: "👨‍🏫 Maksat",   email: "galiev@gmail.com",              password: "maksat123" },
-  { role: "student" as const, label: "👨‍🎓 Nurassyl", email: "bazarbaynurassyl2@gmail.com", password: "nurassyl123" },
+  { role: "teacher" as const,  label: "👨‍🏫 Учитель", email: "make@gmail.com",          password: "1234" },
+  { role: "student" as const,  label: "👨‍🎓 Студент", email: "buira@gmail.com",          password: "1234" },
+  { role: "admin"   as const,  label: "🛡 Админ",    email: "admin@example.com",        password: "admin123" },
 ];
 
 export default function LoginPage() {
-  const [role, setRole] = useState<"student" | "teacher">("student");
+  const [role, setRole] = useState<"student" | "teacher" | "admin">("student");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -145,9 +146,13 @@ export default function LoginPage() {
                     key={acc.email}
                     type="button"
                     onClick={() => {
-                      setRole(acc.role);
-                      setEmail(acc.email);
-                      setPassword(acc.password);
+                      if (acc.role === "admin") {
+                        router.push(`/admin/login?email=${encodeURIComponent(acc.email)}&password=${encodeURIComponent(acc.password)}`);
+                      } else {
+                        setRole(acc.role as "student" | "teacher");
+                        setEmail(acc.email);
+                        setPassword(acc.password);
+                      }
                     }}
                     className="flex-1 h-[36px] bg-white border border-[#c5caff] rounded-[8px] text-[12px] text-[#3525cd] font-semibold hover:bg-[#eef0ff] transition-colors"
                   >

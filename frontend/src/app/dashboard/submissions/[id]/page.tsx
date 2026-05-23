@@ -9,7 +9,8 @@ const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 interface CheckResult {
   id: string;
   passed: boolean;
-  weight: number;
+  weight?: number;
+  score?: number;
   feedback: string;
   description?: string;
 }
@@ -28,6 +29,7 @@ interface Submission {
     summary?: string;
     pass_fail?: string;
     score?: number;
+    teacher_note?: string;
     check_results?: CheckResult[];
   } | null;
 }
@@ -77,6 +79,7 @@ export default function SubmissionDetailPage() {
   const passed = sub.pass_fail === "pass";
   const checks = sub.feedback_json?.check_results ?? [];
   const summary = sub.feedback_json?.summary ?? "";
+  const teacherNote = sub.feedback_json?.teacher_note ?? "";
 
   return (
     <div style={{ padding: "43px 45px", backgroundColor: "var(--color-bg)", minHeight: "100%" }}>
@@ -135,7 +138,12 @@ export default function SubmissionDetailPage() {
                 <span style={{ fontSize: "20px", flexShrink: 0 }}>{c.passed ? "✅" : "❌"}</span>
                 <div style={{ flex: 1 }}>
                   <p style={{ fontSize: "14px", fontWeight: 600, color: "var(--color-text-primary)", margin: "0 0 4px" }}>
-                    {c.id} <span style={{ fontWeight: 400, color: "var(--color-text-subtle)" }}>({Math.round(c.weight * 100)}%)</span>
+                    {c.id}
+                    {(c.weight != null || c.score != null) && (
+                      <span style={{ fontWeight: 400, color: "var(--color-text-subtle)" }}>
+                        {" "}({Math.round((c.weight ?? c.score ?? 0) * 100)}%)
+                      </span>
+                    )}
                   </p>
                   {c.description && (
                     <p style={{ fontSize: "13px", color: "var(--color-text-muted)", margin: "0 0 4px" }}>{c.description}</p>
@@ -149,6 +157,21 @@ export default function SubmissionDetailPage() {
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Teacher note from AI */}
+      {teacherNote && (
+        <div style={{
+          backgroundColor: "#fffbeb", border: "1px solid #fde68a",
+          borderRadius: "10px", padding: "14px 18px", marginBottom: "28px",
+        }}>
+          <p style={{ fontSize: "13px", fontWeight: 600, color: "#92400e", margin: "0 0 4px" }}>
+            📝 Замечание для преподавателя
+          </p>
+          <p style={{ fontSize: "13px", color: "#78350f", margin: 0, lineHeight: "1.5" }}>
+            {teacherNote}
+          </p>
         </div>
       )}
 
