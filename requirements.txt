@@ -27,5 +27,8 @@ passlib[bcrypt]>=1.7.4
 # HTTP client (LLM calls, TG push)
 httpx>=0.27.0
 
+# LLM providers
+anthropic>=0.40.0
+
 # PDF parsing
 pypdf>=4.0.0
