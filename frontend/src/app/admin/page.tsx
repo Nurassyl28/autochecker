@@ -26,6 +26,11 @@ interface Assignment {
   created_at: string;
 }
 
+interface ClassItem {
+  id: number;
+  name: string;
+}
+
 interface Submission {
   id: number;
   assignment_id: number;
@@ -85,12 +90,15 @@ export default function AdminPage() {
   const [createUserLoading, setCreateUserLoading] = useState(false);
   const [createUserError, setCreateUserError] = useState("");
 
+  // Classes (for assignment selector)
+  const [classes, setClasses] = useState<ClassItem[]>([]);
+
   // Assignments
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [assignmentsLoading, setAssignmentsLoading] = useState(true);
   const [showCreateAssignment, setShowCreateAssignment] = useState(false);
   const [assignMode, setAssignMode] = useState<"text" | "file">("text");
-  const [newAssignment, setNewAssignment] = useState({ title: "", description_text: "", reference_solution: "" });
+  const [newAssignment, setNewAssignment] = useState({ title: "", description_text: "", reference_solution: "", class_id: "" });
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [refSolMode, setRefSolMode] = useState<"text" | "file">("text");
   const [refSolFile, setRefSolFile] = useState<File | null>(null);
@@ -98,6 +106,12 @@ export default function AdminPage() {
   const [createAssignmentLoading, setCreateAssignmentLoading] = useState(false);
   const [createAssignmentError, setCreateAssignmentError] = useState("");
   const [expandedSpec, setExpandedSpec] = useState<number | null>(null);
+
+  // Edit user
+  const [editingUserId, setEditingUserId] = useState<number | null>(null);
+  const [editForm, setEditForm] = useState({ email: "", password: "" });
+  const [editUserLoading, setEditUserLoading] = useState(false);
+  const [editUserError, setEditUserError] = useState("");
 
   // Submissions
   const [submissions, setSubmissions] = useState<Submission[]>([]);
@@ -123,6 +137,14 @@ export default function AdminPage() {
     setAssignmentsLoading(false);
   }, []);
 
+  const loadClasses = useCallback(async () => {
+    const res = await fetch(`${BASE_URL}/admin/classes`, { headers: adminHeaders() });
+    if (res.ok) {
+      const data = await res.json();
+      setClasses(data.map((c: { id: number; name: string }) => ({ id: c.id, name: c.name })));
+    }
+  }, []);
+
   const loadSubmissions = useCallback(async () => {
     setSubsLoading(true);
     const res = await fetch(`${BASE_URL}/admin/submissions`, { headers: adminHeaders() });
@@ -133,7 +155,8 @@ export default function AdminPage() {
   useEffect(() => {
     loadUsers();
     loadAssignments();
-  }, [loadUsers, loadAssignments]);
+    loadClasses();
+  }, [loadUsers, loadAssignments, loadClasses]);
 
   useEffect(() => {
     if (tab === "submissions") loadSubmissions();
@@ -167,6 +190,31 @@ export default function AdminPage() {
     await loadUsers();
   }
 
+  async function handleEditUser(e: React.FormEvent) {
+    e.preventDefault();
+    if (!editingUserId) return;
+    setEditUserLoading(true);
+    setEditUserError("");
+    const body: Record<string, string> = {};
+    if (editForm.email.trim()) body.email = editForm.email.trim();
+    if (editForm.password.trim()) body.password = editForm.password.trim();
+    const res = await fetch(`${BASE_URL}/admin/users/${editingUserId}`, {
+      method: "PATCH",
+      headers: adminHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(body),
+    });
+    if (res.ok) {
+      setEditingUserId(null);
+      setEditForm({ email: "", password: "" });
+      await loadUsers();
+    } else {
+      const err = await res.json().catch(() => ({}));
+      const detail = (err as { detail?: unknown }).detail;
+      setEditUserError(typeof detail === "string" ? detail : "Ошибка обновления");
+    }
+    setEditUserLoading(false);
+  }
+
   // Create assignment
   async function handleCreateAssignment(e: React.FormEvent) {
     e.preventDefault();
@@ -179,6 +227,7 @@ export default function AdminPage() {
       const fd = new FormData();
       fd.append("title", newAssignment.title.trim());
       fd.append("file", uploadFile);
+      if (newAssignment.class_id) fd.append("class_id", newAssignment.class_id);
       if (refSolMode === "file" && refSolFile) {
         fd.append("reference_solution_file", refSolFile);
       } else if (newAssignment.reference_solution.trim()) {
@@ -191,15 +240,17 @@ export default function AdminPage() {
         method: "POST",
         headers: adminHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
-          ...newAssignment,
+          title: newAssignment.title.trim(),
+          description_text: newAssignment.description_text.trim(),
           reference_solution: newAssignment.reference_solution.trim() || null,
+          class_id: newAssignment.class_id ? Number(newAssignment.class_id) : null,
         }),
       });
     }
 
     if (res.ok) {
       setShowCreateAssignment(false);
-      setNewAssignment({ title: "", description_text: "", reference_solution: "" });
+      setNewAssignment({ title: "", description_text: "", reference_solution: "", class_id: "" });
       setUploadFile(null);
       setRefSolFile(null);
       setRefSolMode("text");
@@ -286,7 +337,7 @@ export default function AdminPage() {
               </div>
             )}
 
-            <div style={{ display: "grid", gridTemplateColumns: "40px 2fr 2fr 120px 150px 80px", padding: "10px 24px", backgroundColor: "#f9fafb", borderBottom: "1px solid #e5e7eb" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "40px 2fr 2fr 120px 150px 190px", padding: "10px 24px", backgroundColor: "#f9fafb", borderBottom: "1px solid #e5e7eb" }}>
               {["", "Имя / Email", "Telegram ID", "Роль", "Дата", ""].map((h, i) => (
                 <span key={i} style={{ fontSize: "12px", fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.4px" }}>{h}</span>
               ))}
@@ -298,25 +349,54 @@ export default function AdminPage() {
               <div style={{ padding: "48px", textAlign: "center", color: "#9ca3af" }}>Пользователей нет</div>
             ) : users.map((u, i) => {
               const roleInfo = ROLE_LABELS[u.role] ?? ROLE_LABELS.student;
+              const isEditing = editingUserId === u.id;
               return (
-                <div key={u.id} style={{ display: "grid", gridTemplateColumns: "40px 2fr 2fr 120px 150px 80px", padding: "12px 24px", alignItems: "center", borderBottom: i < users.length - 1 ? "1px solid #f3f4f6" : "none" }}
-                  onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "#fafafa")}
-                  onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}>
-                  <div style={{ width: "32px", height: "32px", borderRadius: "50%", backgroundColor: AVATAR_COLORS[i % AVATAR_COLORS.length], display: "flex", alignItems: "center", justifyContent: "center" }}>
-                    <span style={{ fontSize: "12px", fontWeight: 700, color: "white" }}>{initials(u)}</span>
+                <div key={u.id} style={{ borderBottom: i < users.length - 1 ? "1px solid #f3f4f6" : "none" }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "40px 2fr 2fr 120px 150px 190px", padding: "12px 24px", alignItems: "center" }}
+                    onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "#fafafa")}
+                    onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}>
+                    <div style={{ width: "32px", height: "32px", borderRadius: "50%", backgroundColor: AVATAR_COLORS[i % AVATAR_COLORS.length], display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      <span style={{ fontSize: "12px", fontWeight: 700, color: "white" }}>{initials(u)}</span>
+                    </div>
+                    <div>
+                      <p style={{ margin: "0 0 2px", fontSize: "14px", fontWeight: 600, color: "#111" }}>{u.full_name || "—"}</p>
+                      <p style={{ margin: 0, fontSize: "12px", color: "#6b7280" }}>{u.email}</p>
+                    </div>
+                    <span style={{ fontSize: "13px", color: "#6b7280" }}>{u.tg_id ?? "—"}</span>
+                    <span style={{ display: "inline-flex", alignItems: "center", height: "24px", padding: "0 10px", borderRadius: "12px", fontSize: "12px", fontWeight: 600, backgroundColor: roleInfo.bg, color: roleInfo.color }}>
+                      {roleInfo.label}
+                    </span>
+                    <span style={{ fontSize: "13px", color: "#6b7280" }}>{u.created_at.slice(0, 10)}</span>
+                    <div style={{ display: "flex", gap: "6px" }}>
+                      <button onClick={() => { setEditingUserId(isEditing ? null : u.id); setEditForm({ email: u.email, password: "" }); setEditUserError(""); }}
+                        style={{ ...btnBase, height: "30px", padding: "0 10px", backgroundColor: isEditing ? "#142175" : "#eff6ff", color: isEditing ? "white" : "#1d4ed8", fontSize: "12px" }}>
+                        {isEditing ? "Закрыть" : "✏️ Изменить"}
+                      </button>
+                      {u.role !== "admin" && (
+                        <button onClick={() => handleDeleteUser(u.id, u.email)} style={{ ...btnBase, height: "30px", padding: "0 10px", backgroundColor: "#fee2e2", color: "#b91c1c", fontSize: "12px" }}>Удалить</button>
+                      )}
+                    </div>
                   </div>
-                  <div>
-                    <p style={{ margin: "0 0 2px", fontSize: "14px", fontWeight: 600, color: "#111" }}>{u.full_name || "—"}</p>
-                    <p style={{ margin: 0, fontSize: "12px", color: "#6b7280" }}>{u.email}</p>
-                  </div>
-                  <span style={{ fontSize: "13px", color: "#6b7280" }}>{u.tg_id ?? "—"}</span>
-                  <span style={{ display: "inline-flex", alignItems: "center", height: "24px", padding: "0 10px", borderRadius: "12px", fontSize: "12px", fontWeight: 600, backgroundColor: roleInfo.bg, color: roleInfo.color }}>
-                    {roleInfo.label}
-                  </span>
-                  <span style={{ fontSize: "13px", color: "#6b7280" }}>{u.created_at.slice(0, 10)}</span>
-                  {u.role !== "admin"
-                    ? <button onClick={() => handleDeleteUser(u.id, u.email)} style={{ ...btnBase, height: "30px", padding: "0 12px", backgroundColor: "#fee2e2", color: "#b91c1c", fontSize: "12px" }}>Удалить</button>
-                    : <span />}
+                  {isEditing && (
+                    <div style={{ padding: "16px 24px 20px", backgroundColor: "#f8fafc", borderTop: "1px solid #e5e7eb" }}>
+                      <form onSubmit={handleEditUser} style={{ display: "flex", gap: "10px", flexWrap: "wrap", alignItems: "flex-end" }}>
+                        <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                          <label style={{ fontSize: "11px", fontWeight: 600, color: "#6b7280", textTransform: "uppercase" }}>Email</label>
+                          <input type="email" value={editForm.email} onChange={(e) => setEditForm(p => ({ ...p, email: e.target.value }))}
+                            style={{ ...inputStyle, minWidth: "220px" }} />
+                        </div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                          <label style={{ fontSize: "11px", fontWeight: 600, color: "#6b7280", textTransform: "uppercase" }}>Новый пароль</label>
+                          <input type="password" placeholder="Оставьте пустым, чтобы не менять" value={editForm.password} onChange={(e) => setEditForm(p => ({ ...p, password: e.target.value }))}
+                            style={{ ...inputStyle, minWidth: "260px" }} />
+                        </div>
+                        <button type="submit" disabled={editUserLoading} style={{ ...btnBase, backgroundColor: "#142175", color: "white", opacity: editUserLoading ? 0.6 : 1 }}>
+                          {editUserLoading ? "Сохраняем..." : "Сохранить"}
+                        </button>
+                      </form>
+                      {editUserError && <p style={{ color: "#e53e3e", fontSize: "13px", margin: "8px 0 0" }}>{editUserError}</p>}
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -351,6 +431,13 @@ export default function AdminPage() {
                   <input type="text" placeholder="Название задания" required value={newAssignment.title}
                     onChange={(e) => setNewAssignment((p) => ({ ...p, title: e.target.value }))}
                     style={{ ...inputStyle, height: "40px", width: "100%" }} />
+
+                  <select value={newAssignment.class_id}
+                    onChange={(e) => setNewAssignment((p) => ({ ...p, class_id: e.target.value }))}
+                    style={{ ...inputStyle, height: "40px", width: "100%", color: newAssignment.class_id ? "#111" : "#6b7280" }}>
+                    <option value="">— Без класса (видно всем студентам) —</option>
+                    {classes.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
 
                   {assignMode === "text" ? (
                     <textarea placeholder="Описание задания..." required rows={5} value={newAssignment.description_text}
@@ -406,7 +493,7 @@ export default function AdminPage() {
                     <button type="submit" disabled={createAssignmentLoading} style={{ ...btnBase, backgroundColor: "#142175", color: "white", opacity: createAssignmentLoading ? 0.6 : 1 }}>
                       {createAssignmentLoading ? "Создаём..." : "Создать задание"}
                     </button>
-                    <button type="button" onClick={() => { setShowCreateAssignment(false); setCreateAssignmentError(""); }} style={{ ...btnBase, backgroundColor: "#f3f4f6", color: "#374151" }}>Отмена</button>
+                    <button type="button" onClick={() => { setShowCreateAssignment(false); setCreateAssignmentError(""); setNewAssignment({ title: "", description_text: "", reference_solution: "", class_id: "" }); }} style={{ ...btnBase, backgroundColor: "#f3f4f6", color: "#374151" }}>Отмена</button>
                   </div>
                 </form>
               </div>

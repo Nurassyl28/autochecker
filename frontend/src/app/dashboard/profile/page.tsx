@@ -34,7 +34,12 @@ export default function ProfilePage() {
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState("");
+  const [editEmail, setEditEmail] = useState("");
+  const [oldPassword, setOldPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const [saveSuccess, setSaveSuccess] = useState("");
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -46,7 +51,7 @@ export default function ProfilePage() {
       .then((d: UserProfile) => {
         setProfile(d);
         setEditName(d.full_name || "");
-        // Update sessionStorage so dashboard greets with correct name
+        setEditEmail(d.email || "");
         sessionStorage.setItem("user_name", d.full_name || d.email.split("@")[0]);
         sessionStorage.setItem("user_email", d.email);
         const saved = localStorage.getItem(`avatar_${d.id}`);
@@ -67,21 +72,66 @@ export default function ProfilePage() {
     reader.readAsDataURL(file);
   }
 
+  function handleDeleteAvatar() {
+    if (!profile) return;
+    setAvatarUrl(null);
+    localStorage.removeItem(`avatar_${profile.id}`);
+  }
+
+  function startEditing() {
+    if (!profile) return;
+    setEditing(true);
+    setEditName(profile.full_name || "");
+    setEditEmail(profile.email || "");
+    setOldPassword("");
+    setNewPassword("");
+    setSaveError("");
+    setSaveSuccess("");
+  }
+
   async function handleSave() {
     if (!profile) return;
     setSaving(true);
+    setSaveError("");
+    setSaveSuccess("");
+
+    const body: Record<string, string> = {};
+    if (editName.trim() !== profile.full_name) body.full_name = editName.trim();
+    if (editEmail.trim() !== profile.email) body.email = editEmail.trim();
+    if (newPassword) {
+      body.old_password = oldPassword;
+      body.new_password = newPassword;
+    }
+
+    if (Object.keys(body).length === 0) {
+      setEditing(false);
+      setSaving(false);
+      return;
+    }
+
     const token = getToken();
     const r = await fetch(`${BASE_URL}/user/me`, {
       method: "PATCH",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ full_name: editName }),
+      body: JSON.stringify(body),
     });
+
     if (r.ok) {
-      setProfile((p) => p ? { ...p, full_name: editName } : p);
-      sessionStorage.setItem("user_name", editName || profile.email.split("@")[0]);
+      const data = await r.json();
+      setProfile((p) => p ? {
+        ...p,
+        full_name: editName.trim(),
+        email: data.email ?? p.email,
+      } : p);
+      sessionStorage.setItem("user_name", editName.trim() || profile.email.split("@")[0]);
+      if (data.email) sessionStorage.setItem("user_email", data.email);
+      setSaveSuccess("Сохранено успешно");
+      setEditing(false);
+    } else {
+      const err = await r.json().catch(() => ({}));
+      setSaveError((err as { detail?: string }).detail || "Ошибка сохранения");
     }
     setSaving(false);
-    setEditing(false);
   }
 
   const inputStyle: React.CSSProperties = {
@@ -118,13 +168,11 @@ export default function ProfilePage() {
               borderRadius: "14px", padding: "28px 20px",
               display: "flex", flexDirection: "column", alignItems: "center", gap: "12px", textAlign: "center",
             }}>
-              <div style={{ position: "relative", width: "88px", height: "88px", cursor: "pointer" }}
-                onClick={() => fileInputRef.current?.click()} title="Загрузить фото">
-                <input ref={fileInputRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handleAvatarChange} />
-                <div style={{
-                  width: "88px", height: "88px", borderRadius: "50%", backgroundColor: avatarColor,
-                  display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden",
-                }}>
+              <div style={{ position: "relative", width: "88px", height: "88px" }}>
+                <div style={{ width: "88px", height: "88px", borderRadius: "50%", backgroundColor: avatarColor,
+                  display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", cursor: "pointer" }}
+                  onClick={() => fileInputRef.current?.click()} title="Загрузить фото">
+                  <input ref={fileInputRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handleAvatarChange} />
                   {avatarUrl
                     ? <img src={avatarUrl} alt="avatar" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
                     : <span style={{ fontSize: "32px", fontWeight: 700, color: "white" }}>{initials(profile.full_name, profile.email)}</span>
@@ -134,9 +182,19 @@ export default function ProfilePage() {
                   position: "absolute", bottom: 0, right: 0,
                   width: "26px", height: "26px", borderRadius: "50%",
                   backgroundColor: "var(--color-btn-primary-bg)", border: "2px solid var(--color-card)",
-                  display: "flex", alignItems: "center", justifyContent: "center", fontSize: "12px",
-                }}>📷</div>
+                  display: "flex", alignItems: "center", justifyContent: "center", fontSize: "12px", cursor: "pointer",
+                }} onClick={() => fileInputRef.current?.click()}>📷</div>
               </div>
+
+              {avatarUrl && (
+                <button onClick={handleDeleteAvatar} style={{
+                  background: "none", border: "1px solid #fca5a5", borderRadius: "6px",
+                  color: "#b91c1c", fontSize: "12px", padding: "3px 10px", cursor: "pointer",
+                }}>
+                  🗑 Удалить фото
+                </button>
+              )}
+
               <div>
                 <p style={{ fontSize: "17px", fontWeight: 700, color: "var(--color-text-primary)", margin: "0 0 8px" }}>{displayName}</p>
                 <span style={{
@@ -194,7 +252,6 @@ export default function ProfilePage() {
               backgroundColor: "var(--color-card)", border: "1px solid var(--color-border-card)",
               borderRadius: "14px", overflow: "hidden",
             }}>
-              {/* Card header */}
               <div style={{
                 padding: "18px 24px", borderBottom: "1px solid var(--color-border-card)",
                 backgroundColor: "var(--color-bg-alt)",
@@ -204,7 +261,7 @@ export default function ProfilePage() {
                   Личные данные
                 </h2>
                 {!editing ? (
-                  <button onClick={() => { setEditing(true); setEditName(profile.full_name || ""); }} style={{
+                  <button onClick={startEditing} style={{
                     backgroundColor: "var(--color-card)", color: "var(--color-accent)",
                     border: "1.5px solid var(--color-accent)", borderRadius: "8px",
                     height: "36px", padding: "0 18px", fontSize: "13px", fontWeight: 600, cursor: "pointer",
@@ -213,7 +270,7 @@ export default function ProfilePage() {
                   </button>
                 ) : (
                   <div style={{ display: "flex", gap: "8px" }}>
-                    <button onClick={() => setEditing(false)} style={{
+                    <button onClick={() => { setEditing(false); setSaveError(""); }} style={{
                       backgroundColor: "var(--color-card)", color: "var(--color-text-muted)",
                       border: "1px solid var(--color-border)", borderRadius: "8px",
                       height: "36px", padding: "0 16px", fontSize: "13px", cursor: "pointer",
@@ -227,9 +284,8 @@ export default function ProfilePage() {
                 )}
               </div>
 
-              {/* Fields */}
               <div style={{ padding: "24px", display: "flex", flexDirection: "column", gap: "18px" }}>
-                {/* Name — editable */}
+                {/* Name */}
                 <div>
                   <label style={{ fontSize: "13px", fontWeight: 600, color: "var(--color-text-subtle)", textTransform: "uppercase" as const, letterSpacing: "0.5px", display: "block", marginBottom: "8px" }}>
                     Полное имя
@@ -246,19 +302,24 @@ export default function ProfilePage() {
 
                 <div style={{ height: "1px", backgroundColor: "var(--color-border-card)" }} />
 
-                {/* Email — read only */}
+                {/* Email */}
                 <div>
                   <label style={{ fontSize: "13px", fontWeight: 600, color: "var(--color-text-subtle)", textTransform: "uppercase" as const, letterSpacing: "0.5px", display: "block", marginBottom: "8px" }}>
                     Email (логин)
                   </label>
-                  <p style={{ fontSize: "16px", color: "var(--color-text-primary)", margin: 0, padding: "12px 0" }}>
-                    {profile.email}
-                  </p>
+                  {editing ? (
+                    <input type="email" value={editEmail} onChange={(e) => setEditEmail(e.target.value)}
+                      placeholder="email@example.com" style={inputStyle} />
+                  ) : (
+                    <p style={{ fontSize: "16px", color: "var(--color-text-primary)", margin: 0, padding: "12px 0" }}>
+                      {profile.email}
+                    </p>
+                  )}
                 </div>
 
                 <div style={{ height: "1px", backgroundColor: "var(--color-border-card)" }} />
 
-                {/* Role — read only */}
+                {/* Role */}
                 <div>
                   <label style={{ fontSize: "13px", fontWeight: 600, color: "var(--color-text-subtle)", textTransform: "uppercase" as const, letterSpacing: "0.5px", display: "block", marginBottom: "8px" }}>
                     Роль
@@ -267,6 +328,31 @@ export default function ProfilePage() {
                     {roleLabel}
                   </p>
                 </div>
+
+                {/* Password change — only in edit mode */}
+                {editing && (
+                  <>
+                    <div style={{ height: "1px", backgroundColor: "var(--color-border-card)" }} />
+                    <div>
+                      <label style={{ fontSize: "13px", fontWeight: 600, color: "var(--color-text-subtle)", textTransform: "uppercase" as const, letterSpacing: "0.5px", display: "block", marginBottom: "8px" }}>
+                        Сменить пароль <span style={{ fontWeight: 400, textTransform: "none" }}>(необязательно)</span>
+                      </label>
+                      <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                        <input type="password" value={oldPassword} onChange={(e) => setOldPassword(e.target.value)}
+                          placeholder="Текущий пароль" style={inputStyle} />
+                        <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)}
+                          placeholder="Новый пароль" style={inputStyle} />
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {saveError && (
+                  <p style={{ color: "#e53e3e", fontSize: "14px", margin: 0 }}>{saveError}</p>
+                )}
+                {saveSuccess && (
+                  <p style={{ color: "#15803d", fontSize: "14px", margin: 0 }}>✅ {saveSuccess}</p>
+                )}
               </div>
             </div>
           </div>

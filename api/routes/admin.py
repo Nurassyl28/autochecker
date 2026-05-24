@@ -68,12 +68,19 @@ async def get_user(user_id: int, admin: dict = Depends(require_admin)):
 
 @router.patch("/users/{user_id}")
 async def update_user(user_id: int, body: dict, admin: dict = Depends(require_admin)):
-    allowed = {"full_name", "password", "role"}
-    updates = {k: v for k, v in body.items() if k in allowed}
+    allowed = {"full_name", "role", "email"}
+    updates = {k: v for k, v in body.items() if k in allowed and v is not None}
+    if "password" in body and body["password"]:
+        updates["password_hash"] = hash_password(body["password"])
     if not updates:
         raise HTTPException(400, "Nothing to update")
-    if "password" in updates:
-        updates["password_hash"] = hash_password(updates.pop("password"))
+    if "email" in updates:
+        existing = await db.fetchone(
+            "SELECT id FROM users WHERE email = %s AND id != %s",
+            (updates["email"], user_id),
+        )
+        if existing:
+            raise HTTPException(400, "Email уже используется")
     set_clause = ", ".join(f"{k} = %s" for k in updates)
     params = list(updates.values()) + [user_id, admin["university_id"]]
     await db.execute(
@@ -119,15 +126,15 @@ async def _trigger_spec_generation(assignment_id: int, description: str) -> None
 async def create_assignment(
     background_tasks: BackgroundTasks,
     body: AssignmentCreate,
-    admin: dict = Depends(require_admin),
+    admin: dict = Depends(require_teacher),
 ):
     row = await db.execute_returning(
         """
-        INSERT INTO assignments (university_id, title, description_text, reference_solution, created_by)
-        VALUES (%s, %s, %s, %s, %s)
-        RETURNING id, university_id, title, description_text, spec_status, llm_spec, created_by, created_at, reference_solution
+        INSERT INTO assignments (university_id, title, description_text, reference_solution, class_id, created_by)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        RETURNING id, university_id, title, description_text, spec_status, llm_spec, created_by, created_at, reference_solution, class_id
         """,
-        (admin["university_id"], body.title, body.description_text, body.reference_solution, admin["id"]),
+        (admin["university_id"], body.title, body.description_text, body.reference_solution, body.class_id, admin["id"]),
     )
     background_tasks.add_task(_trigger_spec_generation, row["id"], body.description_text)
     return AssignmentResponse(**row)
@@ -138,9 +145,10 @@ async def create_assignment_from_file(
     background_tasks: BackgroundTasks,
     title: str = Form(...),
     file: UploadFile = File(...),
+    class_id: Optional[int] = Form(None),
     reference_solution: Optional[str] = Form(None),
     reference_solution_file: Optional[UploadFile] = File(None),
-    admin: dict = Depends(require_admin),
+    admin: dict = Depends(require_teacher),
 ):
     """Create assignment from a file (txt, md, pdf, docx). Text extracted automatically."""
     content = await file.read()
@@ -149,7 +157,6 @@ async def create_assignment_from_file(
     if not description_text.strip():
         raise HTTPException(400, "Could not extract text from file. Supported: txt, md, pdf, docx")
 
-    # Extract reference solution from file if provided
     ref_sol = reference_solution or None
     if reference_solution_file:
         ref_content = await reference_solution_file.read()
@@ -160,11 +167,11 @@ async def create_assignment_from_file(
 
     row = await db.execute_returning(
         """
-        INSERT INTO assignments (university_id, title, description_text, reference_solution, created_by)
-        VALUES (%s, %s, %s, %s, %s)
-        RETURNING id, university_id, title, description_text, spec_status, llm_spec, created_by, created_at, reference_solution
+        INSERT INTO assignments (university_id, title, description_text, reference_solution, class_id, created_by)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        RETURNING id, university_id, title, description_text, spec_status, llm_spec, created_by, created_at, reference_solution, class_id
         """,
-        (admin["university_id"], title, description_text, ref_sol, admin["id"]),
+        (admin["university_id"], title, description_text, ref_sol, class_id, admin["id"]),
     )
     background_tasks.add_task(_trigger_spec_generation, row["id"], description_text)
     return AssignmentResponse(**row)
@@ -193,18 +200,18 @@ def _extract_text(data: bytes, filename: str) -> str:
 
 
 @router.get("/assignments", response_model=list[AssignmentResponse])
-async def list_assignments(admin: dict = Depends(require_admin)):
+async def list_assignments(admin: dict = Depends(require_teacher)):
     rows = await db.fetchall(
-        "SELECT id, university_id, title, description_text, spec_status, llm_spec, created_by, created_at, reference_solution FROM assignments WHERE university_id = %s ORDER BY created_at DESC",
+        "SELECT id, university_id, title, description_text, spec_status, llm_spec, created_by, created_at, reference_solution, class_id FROM assignments WHERE university_id = %s ORDER BY created_at DESC",
         (admin["university_id"],),
     )
     return [AssignmentResponse(**r) for r in rows]
 
 
 @router.get("/assignments/{assignment_id}", response_model=AssignmentResponse)
-async def get_assignment(assignment_id: int, admin: dict = Depends(require_admin)):
+async def get_assignment(assignment_id: int, admin: dict = Depends(require_teacher)):
     row = await db.fetchone(
-        "SELECT id, university_id, title, description_text, spec_status, llm_spec, created_by, created_at, reference_solution FROM assignments WHERE id = %s AND university_id = %s",
+        "SELECT id, university_id, title, description_text, spec_status, llm_spec, created_by, created_at, reference_solution, class_id FROM assignments WHERE id = %s AND university_id = %s",
         (assignment_id, admin["university_id"]),
     )
     if not row:

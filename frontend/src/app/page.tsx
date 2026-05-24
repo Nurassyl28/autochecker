@@ -10,7 +10,7 @@ export default function LandingPage() {
         <nav className="flex items-center gap-10 ml-14">
           <a href="#students" className="text-[20px] font-medium text-[#373737] hover:text-[#3525cd] transition-colors">Students</a>
           <a href="#instructor" className="text-[20px] font-medium text-[#373737] hover:text-[#3525cd] transition-colors">Instructor</a>
-          <a href="#resources" className="text-[20px] font-medium text-[#373737] hover:text-[#3525cd] transition-colors">Resources</a>
+          <a href="#footer-resources" className="text-[20px] font-medium text-[#373737] hover:text-[#3525cd] transition-colors">Resources</a>
         </nav>
         <div className="ml-auto flex items-center gap-6">
           <Link href="/login" className="text-[20px] font-medium text-[#373737] hover:text-[#3525cd] transition-colors">
@@ -198,7 +198,7 @@ export default function LandingPage() {
       </main>
 
       {/* ── FOOTER ── */}
-      <footer className="bg-white border-t border-[#eee] px-14 py-10 flex items-start justify-between">
+      <footer id="footer-resources" className="bg-white border-t border-[#eee] px-14 py-10 flex items-start justify-between">
         <div>
           <p className="text-[16px] font-semibold text-black mb-2">EduCode AI</p>
           <p className="text-[13px] text-[#777] max-w-[220px] leading-relaxed">

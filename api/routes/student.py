@@ -23,9 +23,21 @@ router = APIRouter(prefix="/student", tags=["student"])
 
 @router.get("/assignments")
 async def list_assignments(student: dict = Depends(require_student)):
+    # Show assignments for the student's class + assignments with no class (visible to all)
     rows = await db.fetchall(
-        "SELECT id, title, description_text, spec_status, created_at FROM assignments WHERE university_id = %s AND spec_status = 'ready' ORDER BY created_at DESC",
-        (student["university_id"],),
+        """
+        SELECT a.id, a.title, a.description_text, a.spec_status, a.created_at
+        FROM assignments a
+        WHERE a.university_id = %s AND a.spec_status = 'ready'
+          AND (
+            a.class_id IS NULL
+            OR a.class_id IN (
+              SELECT cm.class_id FROM class_members cm WHERE cm.student_id = %s
+            )
+          )
+        ORDER BY a.created_at DESC
+        """,
+        (student["university_id"], student["id"]),
     )
     return rows
 

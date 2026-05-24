@@ -41,8 +41,9 @@ class UserResponse(BaseModel):
 
 class AssignmentCreate(BaseModel):
     title: str
-    description_text: str  # plain text; PDF is handled via multipart separately
+    description_text: str
     reference_solution: Optional[str] = None
+    class_id: Optional[int] = None
 
 class AssignmentResponse(BaseModel):
     id: int
@@ -54,6 +55,7 @@ class AssignmentResponse(BaseModel):
     created_by: Optional[int]
     created_at: datetime
     reference_solution: Optional[str] = None
+    class_id: Optional[int] = None
 
 
 # ── Submissions ───────────────────────────────────────────────────────────────
