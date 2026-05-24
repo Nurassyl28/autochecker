@@ -60,6 +60,7 @@ jobs:
             echo "==> Run DB migrations"
             cat /home/nurassyl/autochecker/db/migrate_add_repo_hash.sql | docker exec -i autochecker-db psql -U autochecker -d autochecker || true
             cat /home/nurassyl/autochecker/db/migrate_add_reference_solution.sql | docker exec -i autochecker-db psql -U autochecker -d autochecker || true
+            cat /home/nurassyl/autochecker/db/migrate_add_classes.sql | docker exec -i autochecker-db psql -U autochecker -d autochecker || true
             cat /home/nurassyl/autochecker/db/migrate_add_class_to_assignments.sql | docker exec -i autochecker-db psql -U autochecker -d autochecker || true
 
             echo "==> Update frontend"
