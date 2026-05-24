@@ -56,6 +56,11 @@ export default function AdminClasses({ users }: { users: User[] }) {
 
   const [addStudentIds, setAddStudentIds] = useState<number[]>([]);
 
+  const [editingClassId, setEditingClassId] = useState<number | null>(null);
+  const [editClassForm, setEditClassForm] = useState({ name: "", teacher_id: "" });
+  const [editClassLoading, setEditClassLoading] = useState(false);
+  const [editClassError, setEditClassError] = useState("");
+
   const teachers = users.filter((u) => u.role === "teacher");
   const students = users.filter((u) => u.role === "student");
 
@@ -105,6 +110,30 @@ export default function AdminClasses({ users }: { users: User[] }) {
       setCreateError(typeof detail === "string" ? detail : "Ошибка создания класса");
     }
     setCreateLoading(false);
+  }
+
+  async function handleEditClass(e: React.FormEvent) {
+    e.preventDefault();
+    if (!editingClassId) return;
+    setEditClassLoading(true);
+    setEditClassError("");
+    const body: Record<string, string | number | null> = {};
+    if (editClassForm.name.trim()) body.name = editClassForm.name.trim();
+    body.teacher_id = editClassForm.teacher_id ? Number(editClassForm.teacher_id) : null;
+    const res = await fetch(`${BASE_URL}/admin/classes/${editingClassId}`, {
+      method: "PATCH",
+      headers: adminHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(body),
+    });
+    if (res.ok) {
+      setEditingClassId(null);
+      await loadClasses();
+    } else {
+      const err = await res.json().catch(() => ({}));
+      const detail = (err as { detail?: unknown }).detail;
+      setEditClassError(typeof detail === "string" ? detail : "Ошибка обновления");
+    }
+    setEditClassLoading(false);
   }
 
   async function handleDelete(id: number, name: string) {
@@ -224,6 +253,7 @@ export default function AdminClasses({ users }: { users: User[] }) {
         <div style={{ padding: "48px", textAlign: "center", color: "#9ca3af" }}>Классов нет. Создайте первый!</div>
       ) : classes.map((cls, i) => {
         const isExpanded = expandedClass === cls.id;
+        const isEditing = editingClassId === cls.id;
         return (
           <div key={cls.id} style={{ borderBottom: i < classes.length - 1 ? "1px solid #f3f4f6" : "none" }}>
             {/* Class row */}
@@ -240,6 +270,14 @@ export default function AdminClasses({ users }: { users: User[] }) {
                 </p>
               </div>
               <span style={{ fontSize: "12px", color: "#9ca3af", flexShrink: 0 }}>{cls.created_at.slice(0, 10)}</span>
+              <button onClick={() => {
+                  if (isEditing) { setEditingClassId(null); }
+                  else { setEditingClassId(cls.id); setEditClassForm({ name: cls.name, teacher_id: cls.teacher_id ? String(cls.teacher_id) : "" }); setEditClassError(""); }
+                }}
+                style={{ ...btnBase, height: "30px", padding: "0 12px", fontSize: "12px",
+                  backgroundColor: isEditing ? "#142175" : "#f3f4f6", color: isEditing ? "white" : "#374151" }}>
+                {isEditing ? "Закрыть" : "✏️ Изменить"}
+              </button>
               <button onClick={() => setExpandedClass(isExpanded ? null : cls.id)}
                 style={{ ...btnBase, height: "30px", padding: "0 12px", fontSize: "12px",
                   backgroundColor: isExpanded ? "#142175" : "#eff6ff", color: isExpanded ? "white" : "#1d4ed8" }}>
@@ -250,6 +288,36 @@ export default function AdminClasses({ users }: { users: User[] }) {
                 Удалить
               </button>
             </div>
+
+            {/* Edit form */}
+            {isEditing && (
+              <div style={{ padding: "16px 24px 20px", backgroundColor: "#fffbeb", borderTop: "1px solid #fde68a" }}>
+                <form onSubmit={handleEditClass} style={{ display: "flex", gap: "10px", flexWrap: "wrap", alignItems: "flex-end" }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                    <label style={{ fontSize: "11px", fontWeight: 600, color: "#6b7280", textTransform: "uppercase" }}>Название</label>
+                    <input type="text" required value={editClassForm.name}
+                      onChange={(e) => setEditClassForm((p) => ({ ...p, name: e.target.value }))}
+                      style={{ ...inputStyle, minWidth: "220px" }} />
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                    <label style={{ fontSize: "11px", fontWeight: 600, color: "#6b7280", textTransform: "uppercase" }}>Учитель</label>
+                    <select value={editClassForm.teacher_id}
+                      onChange={(e) => setEditClassForm((p) => ({ ...p, teacher_id: e.target.value }))}
+                      style={{ ...inputStyle, minWidth: "200px" }}>
+                      <option value="">— Без учителя —</option>
+                      {teachers.map((t) => (
+                        <option key={t.id} value={t.id}>{t.full_name || t.email}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <button type="submit" disabled={editClassLoading}
+                    style={{ ...btnBase, backgroundColor: "#142175", color: "white", opacity: editClassLoading ? 0.6 : 1 }}>
+                    {editClassLoading ? "Сохраняем..." : "Сохранить"}
+                  </button>
+                </form>
+                {editClassError && <p style={{ color: "#e53e3e", fontSize: "13px", margin: "8px 0 0" }}>{editClassError}</p>}
+              </div>
+            )}
 
             {/* Expanded detail */}
             {isExpanded && (
