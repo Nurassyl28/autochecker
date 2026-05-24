@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { adminGetUsers, adminCreateUser, adminDeleteUser, getToken } from "@/lib/api";
+import { adminGetUsers, adminCreateUser, adminDeleteUser, getAdminToken, clearAdminToken } from "@/lib/api";
 import AdminClasses from "./classes";
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -73,7 +73,7 @@ function initials(u: User) {
 const AVATAR_COLORS = ["#1976d2","#e91e63","#4caf50","#9c27b0","#ff9800","#f44336","#00bcd4","#795548"];
 
 function adminHeaders(extra: Record<string, string> = {}): HeadersInit {
-  const t = getToken();
+  const t = getAdminToken();
   return t ? { Authorization: `Bearer ${t}`, ...extra } : extra;
 }
 
@@ -119,7 +119,7 @@ export default function AdminPage() {
 
   // Auth guard
   useEffect(() => {
-    if (!localStorage.getItem("admin_logged_in")) router.replace("/admin/login");
+    if (!getAdminToken()) router.replace("/admin/login");
   }, [router]);
 
   // Load data
@@ -285,7 +285,7 @@ export default function AdminPage() {
           <div style={{ width: "36px", height: "36px", backgroundColor: "#142175", borderRadius: "10px", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "18px" }}>🛡</div>
           <span style={{ fontSize: "18px", fontWeight: 700, color: "#111" }}>Autochecker Admin</span>
         </div>
-        <button onClick={() => { localStorage.removeItem("admin_logged_in"); router.push("/admin/login"); }}
+        <button onClick={() => { clearAdminToken(); router.push("/admin/login"); }}
           style={{ ...btnBase, backgroundColor: "#fef2f2", color: "#e53e3e" }}>
           Выйти
         </button>

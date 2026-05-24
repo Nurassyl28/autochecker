@@ -17,6 +17,24 @@ export function setToken(token: string): void {
   localStorage.setItem("auth_token", token);
 }
 
+// Admin panel uses its own separate token so it never conflicts with the
+// student/teacher dashboard token or with another admin account.
+export function getAdminToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return sessionStorage.getItem("admin_auth_token") || localStorage.getItem("admin_auth_token");
+}
+
+export function setAdminToken(token: string): void {
+  sessionStorage.setItem("admin_auth_token", token);
+  localStorage.setItem("admin_auth_token", token);
+}
+
+export function clearAdminToken(): void {
+  sessionStorage.removeItem("admin_auth_token");
+  localStorage.removeItem("admin_auth_token");
+  localStorage.removeItem("admin_logged_in");
+}
+
 function authHeaders(extra: Record<string, string> = {}): HeadersInit {
   const token = getToken();
   const base: Record<string, string> = { "Content-Type": "application/json", ...extra };
@@ -178,8 +196,15 @@ export async function sendChatMessage(otherUserId: number, body: string): Promis
 
 // ── Admin ─────────────────────────────────────────────────────────────────────
 
+function adminAuthHeaders(extra: Record<string, string> = {}): HeadersInit {
+  const token = getAdminToken();
+  const base: Record<string, string> = { "Content-Type": "application/json", ...extra };
+  if (token) base["Authorization"] = `Bearer ${token}`;
+  return base;
+}
+
 export async function adminGetUsers(): Promise<Response> {
-  return fetch(`${BASE_URL}/admin/users`, { headers: authHeaders() });
+  return fetch(`${BASE_URL}/admin/users`, { headers: adminAuthHeaders() });
 }
 
 export async function adminCreateUser(data: {
@@ -190,7 +215,7 @@ export async function adminCreateUser(data: {
 }): Promise<Response> {
   return fetch(`${BASE_URL}/admin/users`, {
     method: "POST",
-    headers: authHeaders(),
+    headers: adminAuthHeaders(),
     body: JSON.stringify(data),
   });
 }
@@ -198,7 +223,7 @@ export async function adminCreateUser(data: {
 export async function adminDeleteUser(userId: number): Promise<Response> {
   return fetch(`${BASE_URL}/admin/users/${userId}`, {
     method: "DELETE",
-    headers: authHeaders(),
+    headers: adminAuthHeaders(),
   });
 }
 

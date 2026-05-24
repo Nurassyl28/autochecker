@@ -2,7 +2,7 @@
 
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { login } from "@/lib/api";
+import { setAdminToken } from "@/lib/api";
 
 function AdminLoginForm() {
   const router = useRouter();
@@ -25,18 +25,29 @@ function AdminLoginForm() {
     setLoading(true);
     setError("");
     try {
-      const result = await login(email, password);
-      if (result.ok && (result.role === "admin" || result.role === "teacher")) {
+      const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const res = await fetch(`${BASE_URL}/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setError((err as { detail?: string }).detail || "Неверный email или пароль.");
+        return;
+      }
+      const data = await res.json();
+      if (data.role === "admin" || data.role === "teacher") {
+        // Store admin token separately so it never conflicts with student/teacher dashboard
+        setAdminToken(data.access_token);
         localStorage.setItem("admin_logged_in", "true");
-        sessionStorage.setItem("user_role", result.role || "admin");
-        sessionStorage.setItem("user_email", email);
-        sessionStorage.setItem("user_id", String(result.user_id ?? ""));
-        sessionStorage.setItem("user_name", result.full_name || email.split("@")[0]);
+        sessionStorage.setItem("admin_role", data.role);
+        sessionStorage.setItem("admin_email", email);
+        sessionStorage.setItem("admin_id", String(data.user_id ?? ""));
+        sessionStorage.setItem("admin_name", data.full_name || email.split("@")[0]);
         router.push("/admin");
-      } else if (result.ok) {
-        setError("У вас нет доступа к панели администратора.");
       } else {
-        setError(result.error || "Неверный email или пароль.");
+        setError("У вас нет доступа к панели администратора.");
       }
     } catch {
       setError("Ошибка подключения к серверу.");

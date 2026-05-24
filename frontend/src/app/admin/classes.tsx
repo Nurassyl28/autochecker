@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { getToken } from "@/lib/api";
+import { getAdminToken } from "@/lib/api";
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -27,7 +27,7 @@ interface ClassDetail extends ClassRow {
 }
 
 function adminHeaders(extra: Record<string, string> = {}): HeadersInit {
-  const t = getToken();
+  const t = getAdminToken();
   return t ? { Authorization: `Bearer ${t}`, ...extra } : extra;
 }
 
