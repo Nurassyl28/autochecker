@@ -1,136 +1,173 @@
-# Project Context
+# Autochecker — Project Brief for AI Agents
 
-## Goal
-This project is an automated lab-checking platform that is evolving into an AI tutor for students and an AI teacher-assistant for instructors.
+## What This Is
 
-The current base already exists:
-- automated checking
-- Telegram bot
-- instructor dashboard
-- repo and VM checks
-- hints and LLM analysis
-- some agent-style evaluation
+A multi-tenant AI homework grading platform for universities. Students submit GitHub repos, the system grades them with Claude Haiku, and results appear in a web dashboard + Telegram bot.
 
-This is not a rewrite. It is an upgrade of the existing autochecker architecture into a more tutor-like and teacher-assistant-oriented product.
+**Production URL:** `https://dellover.live`
+**Stack:** FastAPI + PostgreSQL + Next.js 14 + aiogram 3 + Claude Haiku
 
-Current implemented baseline:
-- structured feedback fields are active in check outputs/reports
-- escalation policy is evaluated by failed-attempt thresholds
-- deep diagnostics payload is attached for escalated checks
-- teacher summary APIs are available in dashboard backend
-- SQLite schema is tenant/role-ready and PostgreSQL schema bootstrap is included
+---
 
-## Product Direction
+## Critical Rules
 
-### Student-facing
-- AI tutor, not just a checker
-- Explain what failed, why it failed, and what to do next
-- Track repeated failures and escalate to deeper diagnostics when needed
+1. **Always use `uv run`** for Python — deps live in uv's venv. Never `python3` directly.
+2. **Never edit files in `specs/`** — these are live lab YAML specs, mentor-optimized.
+3. **Never delete `bot/`** — hybrid web + Telegram architecture is intentional.
+4. **Always respond in Russian** — the primary user communicates in Russian.
+5. **Data isolation** — every query on non-superadmin routes must filter by `university_id`.
 
-### Teacher-facing
-- AI teacher-assistant
-- Summarize progress per student, per task, and per cohort
-- Surface common mistakes and intervention suggestions
+---
 
-### Platform-facing
-- Scalable AI learning infrastructure built on repo-based assignments, automated checks, and agent diagnostics
+## Roles & Access
 
-## Team Context
-- This project is being developed by one team with four disciplines:
-- UI/UX
-- Frontend
-- Backend
-- AI
+| Role | DB value | university_id | Can access |
+|------|----------|---------------|------------|
+| Super Admin | *(env key, no DB row)* | — | All universities |
+| University Admin | `admin` | own | Own university only |
+| Teacher | `teacher` | own | Own university only |
+| Student | `student` | own | Own university only |
 
-Current working split:
-- Backend and AI work as one delivery pair.
-- UI/UX and Frontend work as one delivery pair.
+Super admin authenticates via `SUPERADMIN_KEY` header — not JWT.
+All other roles use JWT Bearer tokens.
 
-Primary ownership for the current user:
-- The current user is the backend developer.
-- Backend work should be coordinated closely with AI-related implementation.
-- When proposing tasks, prefer a split where backend and AI changes are grouped together, and UI/UX plus frontend changes are grouped together.
+---
 
-## What Codex Should Always Know
-- This project is only about this codebase.
-- Do not mix ideas from other projects.
-- This repo already has working foundations. Extend them instead of replacing them.
-- Follow the existing architecture and keep concerns separated between `autochecker/`, `bot/`, `dashboard/`, `relay/`, and `specs/`.
-- Prefer editing existing files over creating new ones.
-- Keep code simple, production-ready, and spec-driven.
-- Preserve the current flow where lab behavior is largely defined by YAML specs.
-- Treat this as an upgrade from "autochecker" to "AI tutor + AI teacher-assistant".
-- Respect the team split:
-- Backend + AI changes should be planned together.
-- UI/UX + Frontend changes should be planned together.
-- Prefer task decomposition that matches these two subteams.
+## Key Files
 
-## What We Need To Add
-- Student tutor mode: not just pass/fail, but personalized feedback about what failed, why, and next steps.
-- Escalation flow: after N failed attempts, launch a deeper diagnostic agent that checks repo, logs, and VM, then returns precise fix steps.
-- Teacher-assistant mode: generate summaries per student, per task, and per cohort, with common mistakes and intervention suggestions.
-- Assignment authoring tools: make it easier for instructors to define labs, rubrics, hints, escalation rules, and agent checks without too much manual YAML editing.
-- Learning path support: add a simpler non-technical track with guided explanations, glossary, and smaller tasks.
-- Better product framing and UI: students should experience an AI tutor, and instructors should experience an AI teaching assistant.
+### Backend (`api/`)
+| File | Purpose |
+|------|---------|
+| `app.py` | FastAPI app, middleware, router registration |
+| `auth.py` | JWT encode/decode, `hash_password`, `verify_password` |
+| `database.py` | async psycopg3 pool, `fetchone`, `fetchall`, `execute`, `execute_returning` |
+| `dependencies.py` | `require_student`, `require_teacher`, `require_admin`, `require_any` |
+| `models.py` | Pydantic models: `AssignmentCreate`, `AssignmentResponse`, `SubmissionResponse` |
+| `worker.py` | Background grading: `process_submission()`, `_fetch_repo_files()`, `_compute_repo_hash()` |
+| `routes/auth.py` | `POST /auth/login` → returns JWT + role |
+| `routes/student.py` | assignments (class-filtered), submit, submissions, leaderboard, ask-LLM |
+| `routes/teacher.py` | students list, student detail, submissions, AI summaries |
+| `routes/admin.py` | university-scoped CRUD: users, assignments (with class_id), classes, submissions |
+| `routes/superadmin.py` | platform CRUD: universities, users, classes, assignments (all universities) |
+| `routes/user.py` | `PATCH /user/me` — edit own profile, email, password (requires old password) |
+| `routes/chat.py` | student ↔ teacher messaging |
+| `llm/adapter.py` | `llm_complete(system, user)` — provider-agnostic (anthropic/openai/google) |
+| `llm/repo_checker.py` | `check_repo(spec, snapshot, reference_solution)` — grades code |
+| `llm/spec_generator.py` | `generate_spec(description)` — creates assignment rubric |
 
-## Realization Plan
-- Extend `autochecker/spec.py` to support tutoring text, escalation triggers, learning objectives, and teacher summaries.
-- Add a diagnostic-agent layer on top of the current engine so repo and VM inspection can produce structured root-cause feedback.
-- Upgrade `bot/handlers/check.py` to keep failure history, trigger escalation, and return action-oriented feedback.
-- Upgrade `dashboard/app.py` with cohort analytics, common-failure clustering, and teacher recommendations.
-- Harden relay and remote-check infrastructure so agent runs are reliable, logged, and retryable.
-- Create a second content layer for beginner and non-technical course tracks, including tutor prompts and simpler specs.
+### Frontend (`frontend/src/app/`)
+| Path | Purpose |
+|------|---------|
+| `page.tsx` | Landing page |
+| `login/` | Student + teacher login (`auth_token` in localStorage) |
+| `dashboard/` | Student + teacher dashboard (role-aware sidebar) |
+| `dashboard/profile/` | Edit name, email, password (old pw required), avatar |
+| `dashboard/top10/` | Leaderboard: `/student/leaderboard` for students, `/teacher/students` for teachers |
+| `admin/login/` | Admin login → stores JWT in `admin_auth_token` (separate from `auth_token`) |
+| `admin/page.tsx` | University admin panel: Users / Assignments / Submissions / Classes tabs |
+| `admin/classes.tsx` | Class management (create, edit name/teacher, manage members) |
+| `superadmin/login/` | Key-based super admin login |
+| `superadmin/page.tsx` | University list + per-university management (Users/Classes/Assignments tabs) |
 
-## Stack
-- Python
-- uv
-- Typer CLI
-- FastAPI
-- aiogram
-- aiosqlite / SQLite (current runtime)
-- PostgreSQL (migration target; schema prepared)
-- Jinja2 templates
-- Pydantic
-- YAML lab specs
-- GitHub and GitLab API integration
-- Relay worker for SSH and internal network checks
-- LLM-based analysis via external model APIs
+### Database migrations (run in order)
+```
+db/schema_v2.sql                        ← full schema, run once
+db/migrate_add_repo_hash.sql
+db/migrate_add_reference_solution.sql
+db/migrate_add_classes.sql
+db/migrate_add_class_to_assignments.sql
+```
 
-## Rules
-- Use only patterns that already exist in the repo unless there is a clear reason to introduce a new one.
-- Do not rename files unless necessary.
-- Do not rewrite working subsystems just to make them cleaner.
-- Preserve spec-driven behavior and existing entry points.
-- Use `uv` as the default local developer workflow for environment management and command execution.
-- Prefer `uv run ...` for repo commands and `uv pip install -r requirements.txt` for local dependency installation.
-- Keep student-facing feedback concrete and action-oriented.
-- Keep instructor-facing output summarized and operationally useful.
-- Ask before making broad schema changes or changing core data contracts.
-- Run relevant verification after changes. Prefer `uv run python verify.py` and targeted tests such as `uv run pytest tests/test_agent_eval.py -v` when applicable.
-- Keep infrastructure constraints in mind, especially relay-based access to student VMs and restricted university-network execution paths.
+---
 
-## Important Files
-- `autochecker/__init__.py`
-- `autochecker/engine.py`
-- `autochecker/spec.py`
-- `autochecker/llm_analyzer.py`
-- `autochecker/reporter.py`
-- `bot/handlers/check.py`
-- `bot/database.py`
-- `bot/config.py`
-- `dashboard/app.py`
-- `relay/worker.py`
-- `specs/*.yaml`
-- `specs/lab-06-eval.yaml`
-- `docs/infrastructure.md`
-- `docs/gotchas.md`
-- `README.md`
-- `verify.py`
+## Important Patterns
 
-## Definition Of Done
-- The feature works within the current architecture.
-- Existing flows for checking, bot usage, dashboard usage, and reporting still work.
-- Student-facing output is more helpful, specific, and action-oriented.
-- Instructor-facing output is more useful for summarization and intervention.
-- No avoidable regressions are introduced in repo checks, VM checks, relay flows, or spec loading.
-- Relevant verification passes.
+### Grading cache
+Submissions are cached by `repo_hash` (SHA-256 of sorted file contents). Same code → instant cached result. Changed code → new grading.
+
+### JSON prefill (Anthropic)
+```python
+messages=[
+    {"role": "user", "content": user_msg},
+    {"role": "assistant", "content": "{"},  # forces valid JSON
+]
+# Prepend "{" to response before parsing
+```
+
+### Admin token isolation
+```
+auth_token        → student/teacher dashboard
+admin_auth_token  → admin panel (/admin/*)
+superadmin_key    → super admin panel (/superadmin/*) [localStorage key, not JWT]
+```
+
+### Class-based assignment visibility
+Students only see assignments where:
+- `class_id IS NULL` (visible to all), OR
+- `class_id IN (their class memberships)`
+
+### Tenant isolation pattern
+Every admin/teacher/student route must filter by `user["university_id"]` from the JWT. Never trust client-sent `university_id`.
+
+---
+
+## API Endpoints Summary
+
+### Public
+- `POST /auth/login` → `{access_token, role, user_id, full_name}`
+
+### Student (`require_student`)
+- `GET /student/assignments` — class-filtered
+- `POST /student/submit` — queue grading job
+- `GET /student/submissions` — own history
+- `GET /student/submissions/{id}` — result + feedback
+- `POST /student/submissions/{id}/ask` — ask AI about result
+- `GET /student/leaderboard` — top-10 in university
+
+### Teacher (`require_teacher` = admin or teacher)
+- `GET /teacher/students` — all students with stats
+- `GET /teacher/students/{id}` — student detail + submissions
+- `GET /teacher/submissions` — all submissions
+- `GET /teacher/assignments` — all assignments
+
+### Admin (`require_admin` or `require_teacher`)
+- `GET/POST /admin/users` — list/create users (teacher/student only)
+- `PATCH /admin/users/{id}` — edit email/password
+- `DELETE /admin/users/{id}`
+- `GET/POST /admin/assignments` — CRUD (with class_id, reference_solution)
+- `POST /admin/assignments/upload` — create from file (txt/md/pdf/docx)
+- `GET/POST/DELETE /admin/classes` — class management
+- `POST/DELETE /admin/classes/{id}/members` — add/remove students
+- `GET /admin/submissions` — all university submissions
+
+### Super Admin (X-Superadmin-Key header)
+- `POST /superadmin/auth` — verify key
+- `GET/POST/DELETE /superadmin/universities` — university CRUD
+- `GET/POST/PATCH/DELETE /superadmin/universities/{id}/users`
+- `GET/POST/DELETE /superadmin/universities/{id}/classes`
+- `GET/POST/DELETE /superadmin/universities/{id}/assignments`
+
+### User (any authenticated)
+- `PATCH /user/me` — edit name, email, password (old pw required for pw change)
+
+---
+
+## Definition of Done
+
+- TypeScript compiles (`npx tsc --noEmit`) with zero errors
+- All API routes filter by `university_id` (no cross-tenant leaks)
+- New DB columns have `IF NOT EXISTS` migrations in `db/`
+- Migration added to `.github/workflows/deploy.yml` before restart step
+- No `console.log` or debug prints left in production code
+- Committed and pushed — CI/CD handles deploy automatically
+
+---
+
+## Server Info
+
+- **Host:** `159.89.0.231`, port `2222`, user `nurassyl`
+- **PostgreSQL container:** `autochecker-db`
+- **Services:** `autochecker-api`, `autochecker-bot`, `autochecker-frontend` (systemd)
+- **Frontend dir:** `/home/nurassyl/autochecker-frontend/`
+- **Backend dir:** `/home/nurassyl/autochecker/`
+- **Run migration:** `cat db/file.sql | docker exec -i autochecker-db psql -U autochecker -d autochecker`
