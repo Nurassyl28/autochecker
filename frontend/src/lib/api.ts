@@ -186,7 +186,7 @@ export async function adminCreateUser(data: {
   email: string;
   password: string;
   full_name: string;
-  role: "admin" | "teacher" | "student";
+  role: "teacher" | "student";
 }): Promise<Response> {
   return fetch(`${BASE_URL}/admin/users`, {
     method: "POST",

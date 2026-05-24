@@ -86,7 +86,7 @@ export default function AdminPage() {
   const [users, setUsers] = useState<User[]>([]);
   const [usersLoading, setUsersLoading] = useState(true);
   const [showCreateUser, setShowCreateUser] = useState(false);
-  const [newUser, setNewUser] = useState({ email: "", password: "", full_name: "", role: "student" as "admin" | "teacher" | "student" });
+  const [newUser, setNewUser] = useState({ email: "", password: "", full_name: "", role: "student" as "teacher" | "student" });
   const [createUserLoading, setCreateUserLoading] = useState(false);
   const [createUserError, setCreateUserError] = useState("");
 
@@ -324,10 +324,9 @@ export default function AdminPage() {
                         onChange={(e) => setNewUser((p) => ({ ...p, [key]: e.target.value }))}
                         style={{ ...inputStyle, minWidth: "180px" }} />
                     ))}
-                  <select value={newUser.role} onChange={(e) => setNewUser((p) => ({ ...p, role: e.target.value as "admin" | "teacher" | "student" }))} style={{ ...inputStyle }}>
+                  <select value={newUser.role} onChange={(e) => setNewUser((p) => ({ ...p, role: e.target.value as "teacher" | "student" }))} style={{ ...inputStyle }}>
                     <option value="student">Студент</option>
                     <option value="teacher">Учитель</option>
-                    <option value="admin">Админ</option>
                   </select>
                   <button type="submit" disabled={createUserLoading} style={{ ...btnBase, backgroundColor: "#142175", color: "white", opacity: createUserLoading ? 0.6 : 1 }}>
                     {createUserLoading ? "Создаём..." : "Создать"}
