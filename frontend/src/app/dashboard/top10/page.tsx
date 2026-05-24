@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getStudents, getStudentDetails } from "@/lib/api";
+import { getStudents, getStudentDetails, getToken } from "@/lib/api";
 
-// v2 student from teacher list — no leaderboard endpoint yet
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
 interface StudentRow {
   id: number;
   email: string;
@@ -49,6 +50,8 @@ export default function Top10Page() {
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [marksCache, setMarksCache] = useState<Record<number, SubMark[]>>({});
   const [marksLoading, setMarksLoading] = useState<Record<number, boolean>>({});
+  const isStudent = typeof window !== "undefined"
+    && (sessionStorage.getItem("user_role") || localStorage.getItem("user_role")) === "student";
 
   async function toggleExpand(studentId: number) {
     if (expandedId === studentId) { setExpandedId(null); return; }
@@ -67,19 +70,18 @@ export default function Top10Page() {
   }
 
   useEffect(() => {
-    getStudents()
-      .then((r) => (r.ok ? r.json() : []))
+    const role = sessionStorage.getItem("user_role") || localStorage.getItem("user_role");
+    const token = getToken();
+
+    const fetchData = role === "student"
+      ? fetch(`${BASE_URL}/student/leaderboard`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+          .then((r) => r.ok ? r.json() : [])
+      : getStudents().then((r) => r.ok ? r.json() : []);
+
+    fetchData
       .then((data: StudentRow[]) => {
         if (!Array.isArray(data)) return;
         const entries: LeaderEntry[] = data
-          .filter((s) => (s.passed_tasks ?? 0) > 0)          // only students with submissions
-          .sort((a, b) => {
-            // primary: avg_score desc, secondary: passed_tasks desc
-            const scoreA = a.avg_score ?? 0;
-            const scoreB = b.avg_score ?? 0;
-            if (scoreB !== scoreA) return scoreB - scoreA;
-            return (b.passed_tasks ?? 0) - (a.passed_tasks ?? 0);
-          })
           .slice(0, 10)
           .map((s, i) => {
             const name = (s.full_name || s.email.split("@")[0]).trim();
@@ -87,7 +89,6 @@ export default function Top10Page() {
             const initials = parts.length >= 2
               ? (parts[0][0] + parts[1][0]).toUpperCase()
               : name.slice(0, 2).toUpperCase();
-            // Total rating = avg_score (0-100) × passed_tasks → shows combined effort
             const points = Math.round((s.avg_score ?? 0) * (s.passed_tasks ?? 0));
             return {
               rank: i + 1,
@@ -243,25 +244,27 @@ export default function Top10Page() {
                       <TrendIcon trend={row.trend} />
                     </div>
 
-                    {/* Expand button */}
-                    <button
-                      onClick={() => toggleExpand(row.id)}
-                      title={isExpanded ? "Скрыть оценки" : "Показать оценки"}
-                      style={{
-                        width: "32px", height: "32px", borderRadius: "7px",
-                        backgroundColor: isExpanded ? "var(--color-accent)" : "var(--color-bg-alt)",
-                        border: `1px solid ${isExpanded ? "var(--color-accent)" : "var(--color-border-input)"}`,
-                        color: isExpanded ? "white" : "var(--color-text-muted)",
-                        fontSize: "18px", fontWeight: 700, cursor: "pointer",
-                        display: "flex", alignItems: "center", justifyContent: "center",
-                      }}
-                    >
-                      {isExpanded ? "−" : "+"}
-                    </button>
+                    {/* Expand button — teachers only */}
+                    {!isStudent ? (
+                      <button
+                        onClick={() => toggleExpand(row.id)}
+                        title={isExpanded ? "Скрыть оценки" : "Показать оценки"}
+                        style={{
+                          width: "32px", height: "32px", borderRadius: "7px",
+                          backgroundColor: isExpanded ? "var(--color-accent)" : "var(--color-bg-alt)",
+                          border: `1px solid ${isExpanded ? "var(--color-accent)" : "var(--color-border-input)"}`,
+                          color: isExpanded ? "white" : "var(--color-text-muted)",
+                          fontSize: "18px", fontWeight: 700, cursor: "pointer",
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                        }}
+                      >
+                        {isExpanded ? "−" : "+"}
+                      </button>
+                    ) : <span />}
                   </div>
 
-                  {/* Inline marks panel */}
-                  {isExpanded && (
+                  {/* Inline marks panel — teachers only */}
+                  {!isStudent && isExpanded && (
                     <div style={{
                       borderTop: "1px solid var(--color-border-card)",
                       backgroundColor: "var(--color-bg-alt)",

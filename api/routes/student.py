@@ -113,6 +113,32 @@ async def get_submission(submission_id: int, student: dict = Depends(require_stu
     return result
 
 
+@router.get("/leaderboard")
+async def get_leaderboard(student: dict = Depends(require_student)):
+    """Top-10 students by score within the same university."""
+    rows = await db.fetchall(
+        """
+        SELECT
+            u.id,
+            u.full_name,
+            u.email,
+            COUNT(s.id) FILTER (WHERE s.status = 'done' AND s.pass_fail = 'pass') AS passed_tasks,
+            ROUND(
+                COALESCE(AVG(s.score) FILTER (WHERE s.status = 'done' AND s.score IS NOT NULL) * 100, 0)
+            )::int AS avg_score
+        FROM users u
+        LEFT JOIN submissions s ON s.student_id = u.id
+        WHERE u.university_id = %s AND u.role = 'student'
+        GROUP BY u.id
+        HAVING COUNT(s.id) FILTER (WHERE s.status = 'done') > 0
+        ORDER BY avg_score DESC, passed_tasks DESC
+        LIMIT 10
+        """,
+        (student["university_id"],),
+    )
+    return [dict(r) for r in rows]
+
+
 @router.post("/submissions/{submission_id}/ask")
 async def ask_llm(
     submission_id: int,

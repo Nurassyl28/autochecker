@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import database as db
-from .routes import admin, auth, bot, chat, student, teacher, user
+from .routes import admin, auth, bot, chat, student, superadmin, teacher, user
 
 logging.basicConfig(level=logging.INFO)
 
@@ -41,6 +41,7 @@ app.include_router(student.router)
 app.include_router(chat.router)
 app.include_router(bot.router)
 app.include_router(user.router)
+app.include_router(superadmin.router)
 
 
 @app.get("/health")
